@@ -113,6 +113,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/stat_server" dist/
           cp config.toml dist/
           cp systemd/stat_server.service dist/
+          cp scripts/deploy-server.sh dist/
+          chmod +x dist/deploy-server.sh
           cd dist
           zip -r "../stat_server-${{ matrix.target }}.zip" .
 

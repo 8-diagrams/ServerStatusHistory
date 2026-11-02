@@ -294,6 +294,23 @@ sudo mkdir -p /opt/ServerStatus/data
 
 ### 7.4 替换 systemd 二进制
 
+也可以使用仓库提供的自动部署脚本。GitHub Actions 生成的 ZIP 已包含该脚本：
+
+```bash
+unzip stat_server-x86_64-unknown-linux-musl.zip
+sudo ./deploy-server.sh --artifact ./stat_server --config ./config.toml
+```
+
+升级已有部署时不传 `--config`，脚本会保留 `/opt/ServerStatus/config.toml` 和历史数据：
+
+```bash
+sudo ./deploy-server.sh --artifact ./stat_server
+```
+
+脚本会备份旧二进制、配置和 systemd unit 到 `/opt/ServerStatus/backups/<UTC时间>/`，但不会复制可能较大的 SQLite 数据目录。
+
+手工替换方式如下：
+
 ```bash
 sudo systemctl stop stat_server
 sudo install -m 0755 target/release/stat_server /opt/ServerStatus/stat_server
