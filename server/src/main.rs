@@ -29,6 +29,7 @@ mod assets;
 mod auth;
 mod config;
 mod grpc;
+mod history;
 mod http;
 mod jinja;
 mod jwt;
@@ -63,6 +64,7 @@ fn create_app_router() -> Router {
         // .route("/config.pub.json", get(http::get_site_config_json)) // TODO
         .route("/api/admin/authorize", post(jwt::authorize))
         .route("/api/admin/{path}", get(http::admin_api)) // stats.json || config.json
+        .route("/api/history", get(http::get_history))
         // .route("/admin", get(assets::admin_index_handler))
         .route("/detail", get(http::get_detail))
         .route("/map", get(http::get_map))

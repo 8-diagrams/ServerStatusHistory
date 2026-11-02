@@ -73,6 +73,9 @@ pub struct HostStat {
 
     #[serde(skip_deserializing)]
     pub labels: String,
+    /// Server-managed grouping tags. Agents cannot override this field.
+    #[serde(default, skip_deserializing)]
+    pub tags: Vec<String>,
     #[serde(skip_deserializing)]
     pub custom: String,
 

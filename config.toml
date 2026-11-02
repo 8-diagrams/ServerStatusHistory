@@ -21,11 +21,12 @@ admin_pass = ""
 # disabled = true 单机禁用
 # location 支持国旗 emoji https://emojixd.com/group/flags
 # 或国家缩写，如 cn us 等等，所有国家见目录 web/static/flags
-# 自定义标签 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
+# 自定义键值信息 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
+# 多标签分组 tags = ["AWS", "MAILSVR", "MYSQL", "FINTECH"]
 # os 标签可选，不填则使用上报数据，ndd(next due date) 下次续费时间, spec 为主机规格
 # os 可用值 centos debian ubuntu alpine pi arch windows linux macos android freebsd
 hosts = [
-  {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=freebsd;ndd=2022/11/25;spec=2C/4G/60G;"},
+  {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=freebsd;ndd=2022/11/25;spec=2C/4G/60G;", tags = ["AWS", "MYSQL"]},
   {name = "h2", password = "p2", alias = "n2", location = "🏢", type = "kvm", disabled = false},
   {name = "h3", password = "p3", alias = "n3", location = "🏡", type = "kvm", monthstart = 1},
   {name = "h4", password = "p4", alias = "n4", location = "cn", type = "kvm", notify = true, labels = "ndd=2022/11/25;spec=2C/4G/60G;"},
@@ -42,7 +43,7 @@ hosts = [
 # eg. ./stat_client -a "http://127.0.0.1:8080/report" -g g1 -p pp
 hosts_group = [
   # 可以按国家地区或用途来做分组
-  {gid = "g1", password = "pp", location = "🏠", type = "kvm", labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"},
+  {gid = "g1", password = "pp", location = "🏠", type = "kvm", labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;", tags = ["FINTECH"]},
   {gid = "g2", password = "pp", location = "🏢", type = "kvm", notify = true},
   # 例如不发送通知可以单独做一组
   {gid = "silent", password = "pp", location = "🏡", type = "kvm", notify = false},
@@ -60,6 +61,21 @@ workspace = "/opt/ServerStatus"
 # 不开启告警，可忽略后面配置，或者删除不需的通知方式
 # 告警间隔默认为30s
 notify_interval = 30
+
+# 历史指标存储。客户端上报协议无需升级；服务端异步写入 SQLite。
+# backend 预留扩展点，目前支持 sqlite，后续可增加 victoriametrics / influxdb。
+[history]
+enabled = true
+backend = "sqlite"
+path = "data/history.db"
+# latest: 每个时间桶保留最新样本；none: 保存每条上报（数据量较大）
+compression = "latest"
+sample_interval = 60
+retention_days = 30
+cleanup_interval = 3600
+delete_batch_size = 1000
+vacuum_after_cleanup = false
+
 # https://core.telegram.org/bots/api
 # https://jinja.palletsprojects.com/en/3.0.x/templates/#if
 [tgbot]

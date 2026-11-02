@@ -9,6 +9,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./config.toml:/config.toml
       - ./stats.json:/stats.json
+      - ./data:/data
     ports:
       - 8080:8080
       - 9394:9394

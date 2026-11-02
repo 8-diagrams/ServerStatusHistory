@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 use stat_common::{server_status::StatRequest, utils::bytes2human};
 
 use crate::auth;
+use crate::history::HistoryQuery;
 use crate::jinja;
 use crate::jwt;
 use crate::G_CONFIG;
@@ -52,6 +53,22 @@ pub async fn admin_api(_claims: jwt::Claims, Path(path): Path<String>) -> Json<V
     }
 
     Json(json!({ "code": 0, "message": "ok" }))
+}
+
+/// Query historical metrics for gaps that the Web client has not accumulated
+/// locally.  The live feed remains `/json/stats.json`; this endpoint is not
+/// intended to replace the client's real-time polling loop.
+pub async fn get_history(Query(query): Query<HistoryQuery>) -> Json<Value> {
+    let Some(mgr) = G_STATS_MGR.get() else {
+        return Json(json!({"code": 503, "message": "statistics manager is not ready"}));
+    };
+    let Some(history) = mgr.get_history() else {
+        return Json(json!({"code": 404, "message": "history storage is disabled"}));
+    };
+    match history.query(&query) {
+        Ok(value) => Json(value),
+        Err(err) => Json(json!({"code": 400, "message": err.to_string()})),
+    }
 }
 
 #[allow(clippy::unnecessary_wraps)]

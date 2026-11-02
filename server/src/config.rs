@@ -3,6 +3,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use uuid::Uuid;
@@ -24,6 +25,68 @@ fn default_workspace() -> String {
 fn default_tls_dir() -> String {
     "tls".to_string()
 }
+fn default_history_backend() -> String {
+    "sqlite".to_string()
+}
+fn default_history_path() -> String {
+    "data/history.db".to_string()
+}
+fn default_history_sample_interval() -> u64 {
+    60
+}
+fn default_history_retention_days() -> u64 {
+    30
+}
+fn default_history_cleanup_interval() -> u64 {
+    3600
+}
+fn default_history_delete_batch_size() -> usize {
+    1000
+}
+fn default_history_compression() -> String {
+    "latest".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HistoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_history_backend")]
+    pub backend: String,
+    #[serde(default = "default_history_path")]
+    pub path: String,
+    /// `none` stores every received sample; `latest` keeps the latest sample in each bucket.
+    #[serde(default = "default_history_compression")]
+    pub compression: String,
+    #[serde(default = "default_history_sample_interval")]
+    pub sample_interval: u64,
+    #[serde(default = "default_history_retention_days")]
+    pub retention_days: u64,
+    #[serde(default = "default_history_cleanup_interval")]
+    pub cleanup_interval: u64,
+    #[serde(default = "default_history_delete_batch_size")]
+    pub delete_batch_size: usize,
+    #[serde(default)]
+    pub vacuum_after_cleanup: bool,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            // Keep legacy server configurations side-effect free.  The
+            // distributed config.toml explicitly enables history.
+            enabled: false,
+            backend: default_history_backend(),
+            path: default_history_path(),
+            compression: default_history_compression(),
+            sample_interval: default_history_sample_interval(),
+            retention_days: default_history_retention_days(),
+            cleanup_interval: default_history_cleanup_interval(),
+            delete_batch_size: default_history_delete_batch_size(),
+            vacuum_after_cleanup: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Host {
@@ -43,6 +106,9 @@ pub struct Host {
     pub disabled: bool,
     #[serde(default = "Default::default")]
     pub labels: String,
+    /// Operator-managed grouping tags. These are never accepted from agents.
+    #[serde(default = "Default::default")]
+    pub tags: Vec<String>,
 
     #[serde(skip_deserializing)]
     pub last_network_in: u64,
@@ -77,6 +143,8 @@ pub struct HostGroup {
     pub weight: u64,
     #[serde(default = "Default::default")]
     pub labels: String,
+    #[serde(default = "Default::default")]
+    pub tags: Vec<String>,
 }
 
 impl HostGroup {
@@ -92,6 +160,7 @@ impl HostGroup {
             pos: self.pos,
             weight: self.weight,
             labels: self.labels.clone(),
+            tags: self.tags.clone(),
             ..Default::default()
         }
     }
@@ -111,6 +180,8 @@ pub struct Config {
     pub grpc_tls: u32,
     #[serde(default = "default_tls_dir")]
     pub tls_dir: String,
+    #[serde(default)]
+    pub history: HistoryConfig,
     // admin user & pass
     pub admin_user: Option<String>,
     pub admin_pass: Option<String>,
@@ -181,6 +252,7 @@ pub fn from_str(content: &str) -> Option<Config> {
     o.hosts_map = HashMap::new();
 
     for (idx, host) in o.hosts.iter_mut().enumerate() {
+        normalize_tags(&mut host.tags);
         host.pos = idx;
         if host.alias.is_empty() {
             host.alias = host.name.clone();
@@ -193,6 +265,7 @@ pub fn from_str(content: &str) -> Option<Config> {
     }
 
     for (idx, group) in o.hosts_group.iter_mut().enumerate() {
+        normalize_tags(&mut group.tags);
         group.pos = idx;
         group.weight = (10000 - (1 + idx) * 100) as u64;
         o.hosts_group_map.insert(group.gid.clone(), group.clone());
@@ -224,6 +297,14 @@ pub fn from_str(content: &str) -> Option<Config> {
     Some(o)
 }
 
+fn normalize_tags(tags: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    tags.retain_mut(|tag| {
+        *tag = tag.trim().to_string();
+        !tag.is_empty() && seen.insert(tag.to_lowercase())
+    });
+}
+
 pub fn from_env() -> Option<Config> {
     from_str(
         env::var("SRV_CONF")
@@ -243,4 +324,49 @@ pub fn test_from_file(cfg: &str) -> Result<Config> {
         .map(|contents| toml::from_str::<Config>(&contents))
         .unwrap()
         .map_err(anyhow::Error::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_does_not_enable_history_implicitly() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.history.enabled);
+        assert_eq!(cfg.history.backend, "sqlite");
+    }
+
+    #[test]
+    fn host_tags_are_trimmed_deduplicated_and_inherited_by_groups() {
+        let mut tags = vec![
+            " AWS ".to_string(),
+            "mysql".to_string(),
+            "aws".to_string(),
+            String::new(),
+        ];
+        normalize_tags(&mut tags);
+        assert_eq!(tags, vec!["AWS", "mysql"]);
+
+        let group = HostGroup {
+            gid: "mail".to_string(),
+            password: "secret".to_string(),
+            location: String::new(),
+            r#type: String::new(),
+            notify: true,
+            pos: 0,
+            weight: 0,
+            labels: String::new(),
+            tags: vec!["MAILSVR".to_string(), "AWS".to_string()],
+        };
+        assert_eq!(group.inst_host("node-1").tags, group.tags);
+    }
+
+    #[test]
+    fn distributed_config_keeps_root_hosts_outside_history_table() {
+        let cfg: Config = toml::from_str(include_str!("../../config.toml")).unwrap();
+        assert!(cfg.history.enabled);
+        assert!(!cfg.hosts.is_empty());
+        assert_eq!(cfg.hosts[0].tags, vec!["AWS", "MYSQL"]);
+    }
 }

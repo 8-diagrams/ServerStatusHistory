@@ -44,6 +44,7 @@
 - [3. 服务端说明](#3-服务端说明)
   - [3.1 配置文件 `config.toml`](#31-配置文件-configtoml)
   - [3.2 服务端运行](#32-服务端运行)
+  - [3.3 历史指标存储](#33-历史指标存储)
 - [4. 客户端说明](#4-客户端说明)
   - [4.1 Rust 版 Client](#41-rust-版-client)
   - [4.2 Python 版 Client](#42-python-版-client)
@@ -256,11 +257,12 @@ admin_pass = ""
 # disabled = true 单机禁用
 # location 支持国旗 emoji https://emojixd.com/group/flags
 # 或国家缩写，如 cn us 等等，所有国家见目录 web/static/flags
-# 自定义标签 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
+# 自定义键值信息 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
+# 多标签分组 tags = ["AWS", "MAILSVR", "MYSQL", "FINTECH"]
 # os 标签可选，不填则使用上报数据，ndd(next due date) 下次续费时间, spec 为主机规格
 # os 可用值 centos debian ubuntu alpine pi arch windows linux
 hosts = [
-  {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=arch;ndd=2022/11/25;spec=2C/4G/60G;"},
+  {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=arch;ndd=2022/11/25;spec=2C/4G/60G;", tags = ["AWS", "MYSQL"]},
   {name = "h2", password = "p2", alias = "n2", location = "🏢", type = "kvm", disabled = false},
   {name = "h3", password = "p3", alias = "n3", location = "🏡", type = "kvm", monthstart = 1},
   {name = "h4", password = "p4", alias = "n4", location = "cn", type = "kvm", notify = true, labels = "ndd=2022/11/25;spec=2C/4G/60G;"},
@@ -270,7 +272,7 @@ hosts = [
 # gid 为模板组id, 动态注册唯一标识，不可重复
 hosts_group = [
   # 可以按国家地区或用途来做分组
-  {gid = "g1", password = "pp", location = "🏠", type = "kvm", notify = true},
+  {gid = "g1", password = "pp", location = "🏠", type = "kvm", notify = true, tags = ["FINTECH"]},
   {gid = "g2", password = "pp", location = "🏢", type = "kvm", notify = true},
   # 例如不发送通知可以单独做一组
   {gid = "silent", password = "pp", location = "🏡", type = "kvm", notify = false},
@@ -308,6 +310,8 @@ custom_tpl = """
 # wechat, email, webhook 等其它通知方式 配置详细见 config.toml
 ```
 
+`tags` 由服务端配置管理，不需要也不接受 Agent 上报。标签会去除首尾空白并按大小写不敏感去重；`hosts_group` 上配置的标签会由动态注册的主机继承。Theme-Light 的设置面板支持按单个标签筛选和按标签分组；一台服务器拥有多个标签时会同时出现在多个标签分组中，没有标签的服务器归入“未标记”。修改标签配置后需要重启服务端加载配置。
+
 ### 3.2 服务端运行
 ```bash
 # systemd 方式， 参照 scripts/one-touch.sh 脚本 (推荐)
@@ -331,6 +335,56 @@ wget --no-check-certificate -qO config.toml 'https://raw.githubusercontent.com/z
 touch stats.json
 docker-compose up -d
 ```
+
+### 3.3 历史指标存储
+
+示例配置默认使用 SQLite 异步保存历史指标；旧配置文件若没有 `[history]` 段则保持关闭，不影响已有部署。客户端的 HTTP/gRPC 上报协议无需升级。配置位于 `config.toml` 的 `[history]` 段：
+
+```toml
+[history]
+enabled = true
+backend = "sqlite"
+path = "data/history.db"
+compression = "latest"       # latest: 每个时间桶保留最新点；none: 保存每条上报
+sample_interval = 60          # latest 模式的时间桶（秒）
+retention_days = 30           # 0 表示不自动删除
+cleanup_interval = 3600       # 自动清理检查间隔（秒）
+delete_batch_size = 1000      # 分批删除，避免长事务阻塞查询
+vacuum_after_cleanup = false  # 是否在清理后回收 SQLite 空间
+```
+
+历史查询接口为：
+
+```text
+GET /api/history?host=h1&from=<unix>&to=<unix>&step=60&metrics=cpu,load_1,traffic_in,traffic_out
+```
+
+`network_in/out` 是累计计数器；`traffic_in/out` 是服务端按相邻历史点计算出的区间流量，遇到客户端重启或计数器回退时不会产生负值。
+
+Web 客户端的数据读取策略应当是“实时轮询 + 本地积累 + 缺失补拉”：
+
+1. Web 页面打开后，继续轮询现有的 `/json/stats.json`，把收到的实时点积累在当前页面内存，并以较稀疏的快照写入 IndexedDB，用于实时曲线和刷新后的近期数据恢复。
+2. 用户查看的时间段如果仍在浏览器已积累的数据范围内，直接使用本地数据，不重复请求历史 API。
+3. 用户翻看浏览器未打开期间、IndexedDB 已淘汰或本地数据不完整的时间段时，只通过 `/api/history` 请求缺失的时间窗口；补拉结果也会进入 IndexedDB，避免刷新后重复查询。
+4. 服务端返回的数据与本地数据按 `host + metric + timestamp` 合并去重；历史 API 不需要被用来持续轮询当前状态。
+
+因此，服务端历史 API 的定位是“补齐 Web 客户端没有保留的历史区间”，而不是替代现有实时接口。这样可以降低历史 API 的查询压力，也能让打开页面后的当前小时数据保持更及时的采样粒度。
+
+仓库内已集成 MIT 许可的 [ServerStatus-Theme-Light](https://github.com/orilights/ServerStatus-Theme-Light) 源码，位于 `frontend/`。图表支持 CPU、负载、内存/Swap/磁盘使用率、网络速率、区间流量、TCP/UDP、进程/线程、三网延迟和丢包等时间序列，并支持 5 分钟、1 小时、6 小时、24 小时、7 天和 30 天范围。浏览器以 5 秒粒度在页面内存中积累实时点，以 30 秒粒度写入 IndexedDB；切换指标或时间范围时先恢复本地快照，只请求缺失的历史区间。渲染前最多降采样到约 900 个点，避免长时间范围影响浏览器性能。
+
+IndexedDB 缓存保留最近 30 天，使用保守的记录大小估算，硬预算为 512 MiB；达到预算或浏览器站点存储配额压力较高时，会按时间从最旧的数据开始清理到约 448 MiB。因此该主题自身的历史缓存不会接近 1 GiB。
+
+前端构建命令：
+
+```shell
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+```
+
+构建结果会写入 `web/`，同时保留服务端已有的静态资源与 Jinja 模板。
+
+历史存储使用 `HistoryStore` 抽象层。当前实现为 SQLite，后续可以在不改动上报链路的情况下增加 VictoriaMetrics、InfluxDB 等后端。
 
 ## 4. 客户端说明
 

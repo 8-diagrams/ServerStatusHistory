@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Host;
+use crate::history::HistoryService;
 use crate::notifier::{Event, Notifier};
 use crate::payload::{HostStat, StatsResp};
 
@@ -29,6 +30,7 @@ static STAT_SENDER: OnceCell<SyncSender<Cow<HostStat>>> = OnceCell::new();
 pub struct StatsMgr {
     resp_json: Arc<Mutex<String>>,
     stats_data: Arc<Mutex<StatsResp>>,
+    history: Option<Arc<HistoryService>>,
 }
 
 impl StatsMgr {
@@ -36,6 +38,7 @@ impl StatsMgr {
         Self {
             resp_json: Arc::new(Mutex::new("{}".to_string())),
             stats_data: Arc::new(Mutex::new(StatsResp::new())),
+            history: None,
         }
     }
 
@@ -77,6 +80,17 @@ impl StatsMgr {
         cfg: &'static crate::config::Config,
         notifies: Arc<Mutex<Vec<Box<dyn Notifier + Send>>>>,
     ) -> Result<()> {
+        self.history = HistoryService::new(&cfg.history)?;
+        if self.history.is_some() {
+            info!(
+                "history storage enabled: backend={}, path={}, compression={}, sample_interval={}s, retention={}d",
+                cfg.history.backend,
+                cfg.history.path,
+                cfg.history.compression,
+                cfg.history.sample_interval,
+                cfg.history.retention_days
+            );
+        }
         let hosts_map_base = Arc::new(Mutex::new(cfg.hosts_map.clone()));
 
         // load last_network_in/out
@@ -95,6 +109,7 @@ impl StatsMgr {
             let hosts_map = hosts_map_base.clone();
             let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
+            let history = self.history.clone();
 
             move || loop {
                 while let Ok(mut stat) = stat_rx.recv() {
@@ -151,6 +166,7 @@ impl StatsMgr {
                         stat_t.disabled = info.disabled;
                         stat_t.weight += info.weight;
                         stat_t.labels = info.labels.clone();
+                        stat_t.tags.clone_from(&info.tags);
 
                         // !group
                         if !info.alias.is_empty() {
@@ -203,6 +219,9 @@ impl StatsMgr {
                                 }
                             }
                             let arc_stat = Arc::new(stat.into_owned());
+                            if let Some(history) = history.as_ref() {
+                                history.record(&arc_stat);
+                            }
                             if notify_up {
                                 // node up notify
                                 notifier_tx.send((Event::NodeUp, Arc::clone(&arc_stat)));
@@ -222,6 +241,7 @@ impl StatsMgr {
             let hosts_map = hosts_map_base.clone();
             let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
+            let history = self.history.clone();
             let mut latest_notify_ts = 0_u64;
             let mut latest_save_ts = 0_u64;
             let mut latest_group_gc = 0_u64;
@@ -252,10 +272,12 @@ impl StatsMgr {
                             resp.servers.push(Arc::clone(stat));
                             continue;
                         }
+                        let mut became_offline = false;
                         let notify_event = {
                             let o = Arc::make_mut(stat);
                             // 30s 下线
                             if o.latest_ts + cfg.offline_threshold < now {
+                                became_offline = o.online4 || o.online6;
                                 o.online4 = false;
                                 o.online6 = false;
                             }
@@ -289,6 +311,14 @@ impl StatsMgr {
                                 None
                             }
                         };
+
+                        if became_offline {
+                            if let Some(history) = history.as_ref() {
+                                let mut offline_stat = (**stat).clone();
+                                offline_stat.latest_ts = now;
+                                history.record(&offline_stat);
+                            }
+                        }
 
                         // client notify — Arc::clone is O(1), no HostStat copy
                         if let Some(event) = notify_event {
@@ -359,6 +389,10 @@ impl StatsMgr {
 
     pub fn get_stats_json(&self) -> String {
         self.resp_json.lock().unwrap().to_string()
+    }
+
+    pub fn get_history(&self) -> Option<Arc<HistoryService>> {
+        self.history.clone()
     }
 
     #[allow(clippy::unused_self)]
