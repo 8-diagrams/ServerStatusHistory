@@ -1,0 +1,130 @@
+name: Build Linux musl Server
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  PNPM_VERSION: "8.15.9"
+
+jobs:
+  # stat_server embeds web/ at compile time, so build the frontend first and
+  # pass the generated assets to each target job.
+  web:
+    name: Build Theme-Light
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@${PNPM_VERSION} --activate
+          pnpm --version
+
+      - name: Install and build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm lint
+          pnpm build
+
+      - name: Upload web assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-assets
+          path: |
+            web/index.html
+            web/theme-light-assets/**
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-musl:
+    name: Server ${{ matrix.target }}
+    needs: web
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+
+    container:
+      image: ghcr.io/rust-cross/rust-musl-cross:${{ matrix.target }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clean old Theme-Light assets
+        run: rm -rf web/theme-light-assets
+
+      - name: Download web assets
+        uses: actions/download-artifact@v4
+        with:
+          name: web-assets
+          path: web
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -y -qq
+          apt-get install -y -qq protobuf-compiler zip file llvm git
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build stat_server
+        run: |
+          cargo build \
+            --release \
+            --locked \
+            --target "${{ matrix.target }}" \
+            -p stat_server
+
+      - name: Inspect binary
+        run: |
+          file "target/${{ matrix.target }}/release/stat_server"
+          ls -lh "target/${{ matrix.target }}/release/stat_server"
+
+      - name: Strip binary
+        continue-on-error: true
+        run: llvm-strip "target/${{ matrix.target }}/release/stat_server"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/stat_server" dist/
+          cp config.toml dist/
+          cp systemd/stat_server.service dist/
+          cd dist
+          zip -r "../stat_server-${{ matrix.target }}.zip" .
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stat_server-${{ matrix.target }}
+          path: stat_server-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: stat_server-${{ matrix.target }}.zip
+          generate_release_notes: true
