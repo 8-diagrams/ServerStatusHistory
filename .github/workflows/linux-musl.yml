@@ -84,10 +84,11 @@ jobs:
           apt-get update -y -qq
           apt-get install -y -qq protobuf-compiler zip file llvm git
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Verify container Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup target list --installed || true
 
       - name: Build stat_server
         run: |
