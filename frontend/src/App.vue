@@ -66,20 +66,17 @@
             <button v-for="directory in directories" :key="directory.id" class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm" :class="settings.directoryFilter === directory.id ? 'bg-[#f1edff] font-semibold text-[#6544d5]' : 'text-gray-600 hover:bg-[#f8f6ff]'" @click="selectDirectory(directory.id)">
               <span class="flex min-w-0 items-center gap-2"><span class="text-[#a79bbf]">├</span><span class="truncate">{{ directory.name }}</span></span><span class="ml-2 rounded-full bg-[#f5f3f9] px-2 py-0.5 text-xs text-gray-500">{{ directory.count }}</span>
             </button>
-          </div><p class="mt-4 rounded-lg bg-[#faf8ff] px-3 py-2 text-xs leading-5 text-gray-500">
-            {{ t('directoryHelp') }}
-          </p>
+          </div>
         </div>
         <div class="mt-6 border-t border-[#ebe8f2] pt-5">
-          <div class="flex items-center justify-between px-2">
+          <div class="px-2">
             <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
               {{ t('tagFilter') }}
-            </div><button v-if="settings.selectedTags.length" class="text-xs font-medium text-[#7455e9]" @click="clearTags">
-              {{ t('clear') }}
+            </div>
+          </div><div class="mt-3 flex flex-wrap gap-2">
+            <button class="rounded-lg border px-3 py-2 text-sm transition-colors" :class="settings.selectedTags.length === 0 ? 'border-[#7455e9] bg-[#7455e9] text-white shadow-sm' : 'border-[#e4e0eb] bg-white text-gray-600 hover:border-[#a994ee]'" @click="clearTags">
+              {{ t('allTags') }} <span v-if="settings.selectedTags.length === 0" class="ml-1">✓</span>
             </button>
-          </div><p class="mt-2 px-2 text-xs leading-5 text-gray-500">
-            {{ t('tagHelp') }}
-          </p><div class="mt-3 flex flex-wrap gap-2">
             <button v-for="tag in availableTags" :key="tag.name" class="rounded-lg border px-3 py-2 text-sm transition-colors" :class="isTagSelected(tag.name) ? 'border-[#7455e9] bg-[#7455e9] text-white shadow-sm' : 'border-[#e4e0eb] bg-white text-gray-600 hover:border-[#a994ee]'" @click="toggleTag(tag.name)">
               {{ tag.name }} <span class="ml-1 opacity-70">{{ tag.count }}</span><span v-if="isTagSelected(tag.name)" class="ml-1">✓</span>
             </button>

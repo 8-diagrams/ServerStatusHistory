@@ -92,17 +92,6 @@
         {{ server.cpu }}%
       </Progress>
     </div>
-    <div v-if="showMetricChart" class="mt-2">
-      <StatusChart
-        :data="chartHistory"
-        :unit="chartUnit"
-        :decimals="chartDecimals"
-        :max="chartMax"
-      />
-      <div class="text-center text-xs text-gray-500 mt-1 break-words" :title="chartLabel">
-        {{ chartLabel }}
-      </div>
-    </div>
     <div v-if="server.memory_total !== undefined" class="flex items-center gap-2">
       {{ t('memory') }}
       <Progress
@@ -161,6 +150,17 @@
       <Bandage v-if="server.thread_count !== undefined">
         {{ t('thread') }} {{ server.thread_count }}
       </Bandage>
+    </div>
+    <div v-if="showMetricChart" class="mt-3 border-t border-[#f0edf5] pt-2">
+      <StatusChart
+        :data="chartHistory"
+        :unit="chartUnit"
+        :decimals="chartDecimals"
+        :max="chartMax"
+      />
+      <div class="mt-1 break-words text-center text-xs text-gray-500" :title="chartLabel">
+        {{ chartLabel }}
+      </div>
     </div>
   </div>
 </template>
