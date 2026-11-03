@@ -52,14 +52,7 @@
     </div>
     <div class="mx-auto flex max-w-[1800px] flex-col lg:flex-row">
       <aside class="shrink-0 border-b border-[#ebe8f2] bg-white p-4 lg:sticky lg:top-[65px] lg:min-h-[calc(100vh-65px)] lg:w-64 lg:border-b-0 lg:border-r">
-        <div class="grid grid-cols-2 gap-1 rounded-xl bg-[#f6f4fa] p-1">
-          <button class="rounded-lg px-3 py-2 text-sm font-medium" :class="settings.viewMode === 'directory' ? 'bg-[#7455e9] text-white shadow-sm' : 'text-gray-500'" @click="switchView('directory')">
-            目录
-          </button><button class="rounded-lg px-3 py-2 text-sm font-medium" :class="settings.viewMode === 'tag' ? 'bg-[#7455e9] text-white shadow-sm' : 'text-gray-500'" @click="switchView('tag')">
-            标签
-          </button>
-        </div>
-        <div v-if="settings.viewMode === 'directory'" class="mt-5">
+        <div>
           <div class="mb-2 px-2 text-xs font-bold uppercase tracking-wider text-gray-400">
             主机目录
           </div><div class="space-y-1">
@@ -70,7 +63,7 @@
             目录是唯一归属关系；未设置 gid 的主机进入“默认”。
           </p>
         </div>
-        <div v-else class="mt-5">
+        <div class="mt-6 border-t border-[#ebe8f2] pt-5">
           <div class="flex items-center justify-between px-2">
             <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
               标签筛选 · 多选
@@ -78,7 +71,7 @@
               清除
             </button>
           </div><p class="mt-2 px-2 text-xs leading-5 text-gray-500">
-            命中任意已选标签即展示（OR）
+            标签附加在当前目录下；多选时命中任意标签即展示（OR），不选则不过滤。
           </p><div class="mt-3 flex flex-wrap gap-2">
             <button v-for="tag in availableTags" :key="tag.name" class="rounded-lg border px-3 py-2 text-sm transition-colors" :class="isTagSelected(tag.name) ? 'border-[#7455e9] bg-[#7455e9] text-white shadow-sm' : 'border-[#e4e0eb] bg-white text-gray-600 hover:border-[#a994ee]'" @click="toggleTag(tag.name)">
               {{ tag.name }} <span class="ml-1 opacity-70">{{ tag.count }}</span><span v-if="isTagSelected(tag.name)" class="ml-1">✓</span>
@@ -104,9 +97,6 @@
         </div>
         <div v-if="loading || loadingView" class="rounded-xl border border-[#ebe8f2] bg-white px-5 py-12 text-center text-gray-400">
           正在加载主机数据…
-        </div>
-        <div v-else-if="settings.viewMode === 'tag' && settings.selectedTags.length === 0" class="rounded-xl border border-dashed border-[#cfc5ed] bg-[#faf8ff] px-5 py-12 text-center text-[#7455e9]">
-          请从左侧选择一个或多个标签
         </div>
         <Transition v-else name="popup-bottom">
           <div class="space-y-6">
@@ -149,7 +139,7 @@ const MIN_FETCH_INTERVAL = 500
 const HISTORY_RETRY_INTERVAL = 5 * 60 * 1000
 const { width: windowWidth } = useWindowSize()
 const layoutModes = [{ value: 'grid' as const, label: '网格布局' }, { value: 'flex' as const, label: '自适应布局' }, { value: 'list' as const, label: '列表布局' }]
-const settings = useLocalStorage('sstl-settings', { layout: 'grid' as 'grid' | 'flex' | 'list', compactMode: false, viewMode: 'directory' as 'directory' | 'tag', directoryFilter: 'default', selectedTags: [] as string[], showMetricChart: false, chartMetric: 'cpu' as MetricKey, chartHistoryKeep: 300 }, { mergeDefaults: true })
+const settings = useLocalStorage('sstl-settings', { layout: 'grid' as 'grid' | 'flex' | 'list', compactMode: false, directoryFilter: 'default', selectedTags: [] as string[], showMetricChart: false, chartMetric: 'cpu' as MetricKey, chartHistoryKeep: 300 }, { mergeDefaults: true })
 const catalog = ref<HostCatalog>()
 const serverData = ref<{ updated: number; servers: ServerData[] }>()
 const legacyAllServers = ref<ServerData[]>([])
@@ -165,23 +155,30 @@ const historyRequests = new Map<string, number>()
 let requestVersion = 0
 const serverCardCount = computed(() => Math.max(1, Math.floor((windowWidth.value - 300) / CARD_WIDTH)))
 const selectedMetric = computed(() => metricOption(settings.value.chartMetric as MetricKey))
-const directories = computed(() => catalog.value ? [catalog.value.default, ...catalog.value.directories] : [{ id: 'default', name: '默认', count: 0 }])
+const directories = computed(() => {
+  if (!catalog.value)
+    return [{ id: 'all', name: '全部机器', count: 0 }, { id: 'default', name: '默认', count: 0 }]
+  const total = catalog.value.default.count + catalog.value.directories.reduce((sum, item) => sum + item.count, 0)
+  return [{ id: 'all', name: '全部机器', count: total }, catalog.value.default, ...catalog.value.directories]
+})
 const availableTags = computed(() => catalog.value?.tags || [])
 const currentServers = computed(() => serverData.value?.servers || [])
 const uniqueHostCount = computed(() => currentServers.value.length)
 const onlineHostCount = computed(() => currentServers.value.filter(server => server.online4 || server.online6).length)
 const currentDirectory = computed(() => directories.value.find(item => item.id === settings.value.directoryFilter))
-const currentViewTitle = computed(() => settings.value.viewMode === 'directory' ? currentDirectory.value?.name || '默认' : settings.value.selectedTags.length ? settings.value.selectedTags.join(' + ') : '标签观察')
-const viewDescription = computed(() => settings.value.viewMode === 'directory' ? '目录决定主机的唯一归属；首页默认仅加载未设置 gid 的主机。' : '多标签使用 OR 匹配；同一主机可以出现在多个标签分组中。')
-const serverGroups = computed(() => {
-  if (settings.value.viewMode === 'directory')
-    return currentServers.value.length ? [{ key: settings.value.directoryFilter, label: '', servers: currentServers.value }] : []
-  return settings.value.selectedTags.map(tag => ({ key: tag.toLocaleLowerCase(), label: tag, servers: currentServers.value.filter(server => (server.tags || []).some(item => item.toLocaleLowerCase() === tag.toLocaleLowerCase())) })).filter(group => group.servers.length)
-})
+const currentViewTitle = computed(() => currentDirectory.value?.name || '默认')
+const viewDescription = computed(() => settings.value.selectedTags.length
+  ? `当前目录 AND（${settings.value.selectedTags.join(' OR ')}）`
+  : '当前目录内的全部主机；可从左侧附加标签筛选。')
+const serverGroups = computed(() => currentServers.value.length
+  ? [{ key: settings.value.directoryFilter, label: '', servers: currentServers.value }]
+  : [])
 
 onMounted(async () => {
-  if (!settings.value.directoryFilter)
-    settings.value.directoryFilter = 'default'
+  // Every fresh page load starts from the lightweight virtual default
+  // directory. Presentation preferences such as layout remain persisted.
+  settings.value.directoryFilter = 'default'
+  settings.value.selectedTags = []
   await initializeData()
   timer.value = new Worker(new URL('./worker/timer.js', import.meta.url))
   timer.value.addEventListener('message', fetchData)
@@ -205,7 +202,13 @@ async function initializeData() {
   }
   catch {
     scopedApiAvailable.value = false
-    await fetchLegacyData()
+    try {
+      await fetchLegacyData()
+    }
+    catch {
+      error.value = true
+      acceptServerData({ updated: Math.floor(Date.now() / 1000), servers: [] })
+    }
   }
   finally {
     loading.value = false
@@ -214,18 +217,12 @@ async function initializeData() {
 
 function currentHostsUrl() {
   const params = new URLSearchParams()
-  if (settings.value.viewMode === 'directory')
-    params.set('directory', settings.value.directoryFilter || 'default')
-  else
-    settings.value.selectedTags.forEach(tag => params.append('tag', tag))
+  params.set('directory', settings.value.directoryFilter || 'default')
+  settings.value.selectedTags.forEach(tag => params.append('tag', tag))
   return `${HOSTS_API}?${params.toString()}`
 }
 
 async function fetchCurrentView(showLoading = false) {
-  if (settings.value.viewMode === 'tag' && !settings.value.selectedTags.length) {
-    acceptServerData({ updated: Math.floor(Date.now() / 1000), servers: [] })
-    return
-  }
   const version = ++requestVersion
   loadingView.value = showLoading
   try {
@@ -279,17 +276,19 @@ function createLegacyCatalog(servers: ServerData[]): HostCatalog {
 }
 
 function filterLegacyServers(servers: ServerData[]) {
-  if (settings.value.viewMode === 'directory') {
-    return settings.value.directoryFilter === 'default'
-      ? servers.filter(server => !server.gid?.trim())
-      : servers.filter(server => server.gid?.toLocaleLowerCase() === settings.value.directoryFilter.toLocaleLowerCase())
-  }
+  const directory = settings.value.directoryFilter || 'default'
   const selected = new Set(settings.value.selectedTags.map(tag => tag.toLocaleLowerCase()))
-  return servers.filter(server => (server.tags || []).some(tag => selected.has(tag.toLocaleLowerCase())))
+  return servers.filter((server) => {
+    const directoryMatches = directory === 'all'
+      || (directory === 'default' ? !server.gid?.trim() : server.gid?.toLocaleLowerCase() === directory.toLocaleLowerCase())
+    const tagsMatch = selected.size === 0
+      || (server.tags || []).some(tag => selected.has(tag.toLocaleLowerCase()))
+    return directoryMatches && tagsMatch
+  })
 }
 
 async function fetchData() {
-  if (fetching.value || Date.now() - latestUpdated.value < MIN_FETCH_INTERVAL || (settings.value.viewMode === 'tag' && !settings.value.selectedTags.length))
+  if (fetching.value || Date.now() - latestUpdated.value < MIN_FETCH_INTERVAL)
     return
   fetching.value = true
   try {
@@ -298,6 +297,8 @@ async function fetchData() {
     }
     else {
       const response = await fetch(LEGACY_STATS_API)
+      if (!response.ok)
+        throw new Error('legacy stats failed')
       const data = await response.json()
       legacyAllServers.value = data.servers || []
       acceptServerData({ updated: data.updated, servers: filterLegacyServers(legacyAllServers.value) })
@@ -328,9 +329,6 @@ function acceptServerData(data: { updated: number; servers: ServerData[] }) {
 function selectDirectory(directory: string) {
   settings.value.directoryFilter = directory
 }
-function switchView(view: 'directory' | 'tag') {
-  settings.value.viewMode = view
-}
 function isTagSelected(tag: string) {
   return settings.value.selectedTags.some(item => item.toLocaleLowerCase() === tag.toLocaleLowerCase())
 }
@@ -359,7 +357,7 @@ async function refreshMetricHistory() {
   await Promise.all(serverData.value.servers.map(server => refreshServerMetricHistory(server, metric, range, true)))
 }
 
-watch(() => [settings.value.viewMode, settings.value.directoryFilter, settings.value.selectedTags.join('\u0000')], async () => {
+watch(() => [settings.value.directoryFilter, settings.value.selectedTags.join('\u0000')], async () => {
   if (loading.value)
     return
   if (scopedApiAvailable.value) {

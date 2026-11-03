@@ -458,22 +458,28 @@ fn filter_hosts(data: &StatsResp, directory: Option<&str>, tags: &[String]) -> S
         .map(|tag| tag.trim().to_lowercase())
         .filter(|tag| !tag.is_empty())
         .collect::<HashSet<_>>();
-    let directory = directory.unwrap_or("default");
+    let normalized_directory = directory.map(str::trim).filter(|value| !value.is_empty());
+    // A tag-only query searches all directories. An empty query intentionally
+    // stays scoped to `default` so the home page cannot load every host by
+    // accident. `directory=all` is the explicit all-hosts form.
+    let directory = normalized_directory.unwrap_or(if normalized_tags.is_empty() { "default" } else { "all" });
     let servers = data
         .servers
         .iter()
         .filter(|server| {
-            if !normalized_tags.is_empty() {
-                return server
-                    .tags
-                    .iter()
-                    .any(|tag| normalized_tags.contains(&tag.to_lowercase()));
-            }
-            if directory.eq_ignore_ascii_case("default") {
+            let directory_matches = if directory.eq_ignore_ascii_case("all") {
+                true
+            } else if directory.eq_ignore_ascii_case("default") {
                 server.gid.trim().is_empty()
             } else {
                 server.gid.eq_ignore_ascii_case(directory)
-            }
+            };
+            let tags_match = normalized_tags.is_empty()
+                || server
+                    .tags
+                    .iter()
+                    .any(|tag| normalized_tags.contains(&tag.trim().to_lowercase()));
+            directory_matches && tags_match
         })
         .cloned()
         .collect();
@@ -547,7 +553,7 @@ mod host_query_tests {
     }
 
     #[test]
-    fn directory_query_is_unique_and_tag_query_uses_or_semantics() {
+    fn directory_query_is_unique_and_tag_only_query_uses_all_directories() {
         let by_directory = filter_hosts(&data(), Some("FINTECH"), &[]);
         assert_eq!(by_directory.servers[0].name, "fintech-1");
 
@@ -559,6 +565,37 @@ mod host_query_tests {
             .map(|server| server.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["default-1", "mail-1"]);
+    }
+
+    #[test]
+    fn all_directories_and_tags_use_and_or_semantics() {
+        let tags = vec!["mysql".to_string(), "MAILSVR".to_string()];
+        let result = filter_hosts(&data(), Some("all"), &tags);
+        let names = result
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["default-1", "mail-1"]);
+    }
+
+    #[test]
+    fn named_directory_and_tags_are_combined_with_and() {
+        let tags = vec!["AWS".to_string(), "MAILSVR".to_string()];
+        let result = filter_hosts(&data(), Some("FINTECH"), &tags);
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "fintech-1");
+
+        let no_match = filter_hosts(&data(), Some("FINTECH"), &["MYSQL".to_string(), "MAILSVR".to_string()]);
+        assert!(no_match.servers.is_empty());
+    }
+
+    #[test]
+    fn default_directory_and_tags_are_combined_with_and() {
+        let tags = vec!["MYSQL".to_string(), "MAILSVR".to_string()];
+        let result = filter_hosts(&data(), Some("default"), &tags);
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "default-1");
     }
 
     #[test]

@@ -38,6 +38,7 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/json': env.VITE_DEV_API,
+        '/api/hosts': env.VITE_DEV_API,
         '/api/history': env.VITE_DEV_API,
       },
     },

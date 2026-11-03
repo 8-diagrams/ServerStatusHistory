@@ -36,20 +36,11 @@ pub async fn get_hosts_catalog() -> Json<Value> {
     Json(G_STATS_MGR.get().unwrap().get_hosts_catalog())
 }
 
-/// Return only the live hosts needed by the current directory or tag view.
-/// Repeated `tag` parameters use OR semantics.
+/// Return only the live hosts needed by the current directory and tag filter.
+/// Repeated `tag` parameters use OR semantics and are combined with the
+/// directory constraint using AND semantics.
 pub async fn get_hosts(RawQuery(raw_query): RawQuery) -> Response {
     let (directory, tags) = parse_hosts_query(raw_query.as_deref());
-    if directory.is_some() && !tags.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "code": 400,
-                "message": "directory and tag parameters are mutually exclusive"
-            })),
-        )
-            .into_response();
-    }
     Json(G_STATS_MGR.get().unwrap().get_hosts(directory.as_deref(), &tags)).into_response()
 }
 
@@ -521,5 +512,12 @@ mod host_query_tests {
         let (directory, tags) = parse_hosts_query(Some("tag=AWS&tag=MYSQL&tag=FINTECH"));
         assert!(directory.is_none());
         assert_eq!(tags, vec!["AWS", "MYSQL", "FINTECH"]);
+    }
+
+    #[test]
+    fn directory_and_repeated_tags_are_parsed_together() {
+        let (directory, tags) = parse_hosts_query(Some("directory=default&tag=AWS&tag=MYSQL"));
+        assert_eq!(directory.as_deref(), Some("default"));
+        assert_eq!(tags, vec!["AWS", "MYSQL"]);
     }
 }

@@ -24,6 +24,7 @@ admin_pass = ""
 # 自定义键值信息 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
 # 多标签分组 tags = ["AWS", "MAILSVR", "MYSQL", "FINTECH"]
 # 固定主机可用 gid 指定唯一目录；同一主机只能属于一个目录
+# default 和 all 是系统保留的虚拟目录名，请勿配置为 gid
 # os 标签可选，不填则使用上报数据，ndd(next due date) 下次续费时间, spec 为主机规格
 # os 可用值 centos debian ubuntu alpine pi arch windows linux macos android freebsd
 hosts = [
