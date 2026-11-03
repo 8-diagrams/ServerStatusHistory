@@ -1,102 +1,80 @@
 <template>
-  <div class="absolute right-3 sm:right-6 top-4 flex flex-col items-end">
-    <button @click.stop="showSettingPanel = !showSettingPanel">
-      <IconSettings class="text-gray-500 hover:text-black w-6 h-6 transition-colors" />
-    </button>
-    <Transition name="popup-right">
-      <div
-        v-show="showSettingPanel"
-        class="setting-panel border shadow-md rounded-lg px-4 py-3 z-50 bg-white mt-2 min-w-[200px]"
-      >
-        <h2 class="font-bold text-lg">
-          设置
-        </h2>
-        <div class="flex flex-col gap-1">
-          <SettingItem title="布局模式">
-            <div class="rounded-lg overflow-hidden border h-[30px]">
-              <button
-                class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
-                :class="{
-                  '!bg-gray-300 !text-black': settings.layout === 'grid',
-                }"
-                @click="settings.layout = 'grid'"
-              >
-                <IconLayoutGrid class="w-5 h-5" />
-              </button>
-              <button
-                class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
-                :class="{
-                  '!bg-gray-300 !text-black': settings.layout === 'flex',
-                }"
-                @click="settings.layout = 'flex'"
-              >
-                <IconLayoutFlex class="w-5 h-5" />
-              </button>
-              <button
-                class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
-                :class="{
-                  '!bg-gray-300 !text-black': settings.layout === 'list',
-                }"
-                @click="settings.layout = 'list'"
-              >
-                <IconLayoutList class="w-5 h-5" />
-              </button>
-            </div>
-          </SettingItem>
-          <SettingItem title="精简显示">
-            <Switch v-model="settings.compactMode" />
-          </SettingItem>
-          <SettingItem v-if="availableTags.length" title="标签筛选">
-            <select v-model="settings.tagFilter" class="max-w-[130px]">
-              <option value="">
-                全部
-              </option>
-              <option v-for="tag in availableTags" :key="tag" :value="tag">
-                {{ tag }}
-              </option>
-            </select>
-          </SettingItem>
-          <SettingItem v-if="availableTags.length" title="按标签分组">
-            <Switch v-model="settings.groupByTag" />
-          </SettingItem>
-          <SettingItem title="指标图表">
-            <Switch v-model="settings.showMetricChart" />
-          </SettingItem>
-          <SettingItem v-show="settings.showMetricChart" title="指标">
-            <select v-model="settings.chartMetric">
-              <option v-for="option in METRIC_OPTIONS" :key="option.key" :value="option.key">
-                {{ option.label }}
-              </option>
-            </select>
-          </SettingItem>
-          <SettingItem v-show="settings.showMetricChart" title="记录时间">
-            <select v-model="settings.chartHistoryKeep">
-              <option value="300">
-                5分钟
-              </option>
-              <option value="3600">
-                1小时
-              </option>
-              <option value="21600">
-                6小时
-              </option>
-              <option value="86400">
-                24小时
-              </option>
-              <option value="604800">
-                7天
-              </option>
-              <option value="2592000">
-                30天
-              </option>
-            </select>
-          </SettingItem>
-          <div v-show="settings.showMetricChart" class="text-xs text-gray-500 pt-1">
-            页面打开后优先使用浏览器实时积累的数据，仅对本地缺失区间查询服务端历史。
-          </div>
+  <div
+    v-if="serverData"
+    class="sticky top-0 z-40 -mx-3 sm:-mx-6 mb-4 border-b bg-white/95 px-3 py-2 shadow-sm backdrop-blur sm:px-6"
+  >
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+      <div class="flex items-center gap-2">
+        <span class="font-medium">布局</span>
+        <div class="rounded-lg overflow-hidden border h-[30px]">
+          <button
+            class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
+            :class="{ '!bg-gray-300 !text-black': settings.layout === 'grid' }"
+            title="网格布局"
+            @click="settings.layout = 'grid'"
+          >
+            <IconLayoutGrid class="w-5 h-5" />
+          </button>
+          <button
+            class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
+            :class="{ '!bg-gray-300 !text-black': settings.layout === 'flex' }"
+            title="自适应布局"
+            @click="settings.layout = 'flex'"
+          >
+            <IconLayoutFlex class="w-5 h-5" />
+          </button>
+          <button
+            class="p-1 hover:bg-gray-200 text-gray-500 transition-colors"
+            :class="{ '!bg-gray-300 !text-black': settings.layout === 'list' }"
+            title="列表布局"
+            @click="settings.layout = 'list'"
+          >
+            <IconLayoutList class="w-5 h-5" />
+          </button>
         </div>
       </div>
-    </Transition>
+      <label class="flex items-center gap-2">
+        <span class="font-medium">标签</span>
+        <select v-model="settings.tagFilter" class="max-w-[150px] rounded border px-2 py-1">
+          <option value="">全部</option>
+          <option v-for="tag in availableTags" :key="tag" :value="tag">{{ tag }}</option>
+        </select>
+      </label>
+      <label v-if="availableTags.length" class="flex items-center gap-2">
+        <span class="font-medium">按标签分组</span>
+        <Switch v-model="settings.groupByTag" />
+      </label>
+      <label class="flex items-center gap-2">
+        <span class="font-medium">精简</span>
+        <Switch v-model="settings.compactMode" />
+      </label>
+      <label class="flex items-center gap-2">
+        <span class="font-medium">趋势图</span>
+        <Switch v-model="settings.showMetricChart" />
+      </label>
+      <label v-if="settings.showMetricChart" class="flex items-center gap-2">
+        <span class="font-medium">指标</span>
+        <select v-model="settings.chartMetric" class="max-w-[150px] rounded border px-2 py-1">
+          <option v-for="option in METRIC_OPTIONS" :key="option.key" :value="option.key">
+            {{ option.label }}
+          </option>
+        </select>
+      </label>
+      <label v-if="settings.showMetricChart" class="flex items-center gap-2">
+        <span class="font-medium">范围</span>
+        <select v-model="settings.chartHistoryKeep" class="rounded border px-2 py-1">
+          <option value="300">5分钟</option>
+          <option value="3600">1小时</option>
+          <option value="21600">6小时</option>
+          <option value="86400">24小时</option>
+          <option value="604800">7天</option>
+          <option value="2592000">30天</option>
+        </select>
+      </label>
+      <span v-if="settings.showMetricChart" class="text-xs text-gray-500">
+        实时数据优先使用浏览器本地积累，缺失区间才查询服务端。
+      </span>
+    </div>
   </div>
   <div v-if="loading" class="w-fit mx-auto my-2 rounded-lg bg-gray-100 px-4 py-2">
     加载中
@@ -191,7 +169,6 @@ const serverData = ref<{
 const loading = ref(true)
 const error = ref(false)
 const fetching = ref(false)
-const showSettingPanel = ref(false)
 const latestUpdated = ref(0)
 const timer = ref<Worker>()
 const metricHistories = ref<Record<string, ChartPoint[]>>({})
@@ -249,10 +226,6 @@ const serverGroups = computed(() => {
 })
 
 onMounted(() => {
-  document.addEventListener('click', (e) => {
-    if (showSettingPanel.value && !(e.target as HTMLElement).closest('.setting-panel'))
-      showSettingPanel.value = false
-  })
   fetch(JSON_API)
     .then(res => res.json())
     .then((data) => {

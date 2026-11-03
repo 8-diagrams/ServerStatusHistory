@@ -307,6 +307,25 @@ sudo ./deploy-server.sh --artifact ./stat_server --config ./config.toml
 sudo ./deploy-server.sh --artifact ./stat_server
 ```
 
+如果需要在本次部署时重新生成管理凭据和 JWT secret，显式增加 `--regenerate-auth`。脚本会先备份旧配置，再生成新密码并在完成重启后打印一次：
+
+```bash
+sudo ./deploy-server.sh \
+  --artifact ./stat_server \
+  --regenerate-auth
+```
+
+默认会生成类似 `admin_a1b2c3d4` 的用户名，也可以指定固定用户名：
+
+```bash
+sudo ./deploy-server.sh \
+  --artifact ./stat_server \
+  --regenerate-auth \
+  --admin-user operator
+```
+
+不要把新密码写入命令行历史；部署完成后立即保存脚本输出的密码。普通升级不带该参数，不会修改 `admin_user`、`admin_pass` 或 `jwt_secret`。
+
 脚本会备份旧二进制、配置和 systemd unit 到 `/opt/ServerStatus/backups/<UTC时间>/`，但不会复制可能较大的 SQLite 数据目录。
 
 手工替换方式如下：

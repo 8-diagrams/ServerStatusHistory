@@ -20,11 +20,11 @@ CPU 占用率图表
 
 使用 Vue 与 Tailwind CSS 构建的 ServerStatus 主题
 
-基于 [zdz/ServerStatus-Rust](https://github.com/zdz/ServerStatus-Rust) 开发
+基于 [ServerStatusHistory](https://github.com/8-diagrams/ServerStatusHistory) 开发
 
 已兼容的 ServerStatus 实现（仅使用实例站点数据测试，不保证完全兼容，遇到问题请提 Issue）:
 
-- [zdz/ServerStatus-Rust](https://github.com/zdz/ServerStatus-Rust)
+- [ServerStatusHistory](https://github.com/8-diagrams/ServerStatusHistory)
 - [cppla/ServerStatus](https://github.com/cppla/ServerStatus)
 - [BotoX/ServerStatus](https://github.com/BotoX/ServerStatus)
 
@@ -61,8 +61,8 @@ pnpm build
 
 本仓库集成版本使用 `frontend/` 作为源码目录，执行 `pnpm build` 后会直接把可部署产物写入根目录的 `web/`。旗帜和系统图标复用服务端已有的 `/static/flags/4x3/` 与 `/static/os/` 资源，不需要复制上游 `public/image`。
 
-具体操作请看 [github.com/zdz/ServerStatus-Rust#6-faq](https://github.com/zdz/ServerStatus-Rust#6-faq) 中的 **如何使用自定义主题**
+具体操作请看 [ServerStatusHistory FAQ](https://github.com/8-diagrams/ServerStatusHistory#6-faq) 中的 **如何使用自定义主题**
 
 ## 感谢
 
-- [zdz/ServerStatus-Rust](https://github.com/zdz/ServerStatus-Rust)
+- [ServerStatusHistory](https://github.com/8-diagrams/ServerStatusHistory)

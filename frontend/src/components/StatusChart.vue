@@ -39,6 +39,18 @@ type EChartsOption = ComposeOption<
 
 const chartRef = ref<any>()
 
+const yAxisLabelWidth = computed(() => {
+  const values = props.data
+    .map(point => point?.value?.[1])
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    .slice(-30)
+  const labels = values.map(value => formatValue(value))
+  const longest = Math.max(4, ...labels.map(label => label.length))
+  // Keep enough room for values such as "1024.0 MB/s" without making
+  // the chart unusably narrow on small screens.
+  return Math.min(112, Math.max(48, longest * 7 + 8))
+})
+
 watch(() => props.data, () => {
   chartRef.value?.setOption({
     series: [
@@ -49,12 +61,12 @@ watch(() => props.data, () => {
   })
 })
 
-const option: EChartsOption = {
+const option = computed<EChartsOption>(() => ({
   grid: {
-    left: 40,
+    left: yAxisLabelWidth.value,
     right: 20,
     top: 10,
-    bottom: 20,
+    bottom: 24,
   },
   tooltip: {
     trigger: 'axis',
@@ -85,6 +97,8 @@ const option: EChartsOption = {
     axisLabel: {
       hideOverlap: true,
       showMaxLabel: true,
+      width: yAxisLabelWidth.value,
+      overflow: 'break',
       formatter: (value: any) => formatValue(value),
     },
   },
@@ -95,7 +109,7 @@ const option: EChartsOption = {
       showSymbol: false,
     },
   ],
-}
+}))
 
 function formatTime(time: number) {
   const date = new Date(time)

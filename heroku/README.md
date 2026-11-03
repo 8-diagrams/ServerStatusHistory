@@ -58,7 +58,7 @@ heroku accounts:set 账户别名
 mkdir ServerStatus-Rust && cd ServerStatus-Rust
 
 # 下载示例以 v1.7.2 为例 
-wget https://github.com/zdz/ServerStatus-Rust/releases/download/v1.7.2/server-x86_64-unknown-linux-musl.zip  
+wget https://github.com/8-diagrams/ServerStatusHistory/releases/download/v1.7.2/server-x86_64-unknown-linux-musl.zip
 
 unzip server-x86_64-unknown-linux-musl.zip
 rm -f stat_server.service server-x86_64-unknown-linux-musl.zip

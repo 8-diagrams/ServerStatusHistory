@@ -10,8 +10,8 @@ build-backend = "maturin"
 bindings = "bin"
 
 [project.urls]
-Homepage = "https://github.com/zdz/ServerStatus-Rust"
+Homepage = "https://github.com/8-diagrams/ServerStatusHistory"
 Documentation = "https://doc.ssr.rs"
-Repository = "https://github.com/zdz/ServerStatus-Rust"
-Issues = "https://github.com/zdz/ServerStatus-Rust/issues"
-# Changelog = "https://github.com/zdz/ServerStatus-Rust/CHANGELOG.md"
+Repository = "https://github.com/8-diagrams/ServerStatusHistory"
+Issues = "https://github.com/8-diagrams/ServerStatusHistory/issues"
+# Changelog = "https://github.com/8-diagrams/ServerStatusHistory/CHANGELOG.md"

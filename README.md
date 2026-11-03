@@ -1,27 +1,27 @@
 <p align="center">
-  <a href="https://github.com/zdz/ServerStatus-Rust">
+  <a href="https://github.com/8-diagrams/ServerStatusHistory">
     <h1 align="center">✨ Rust 版 ServerStatus 云探针</h1>
   </a>
 </p>
 
 <div align="center">
     <p>
-        <a href="https://github.com/zdz/ServerStatus-Rust/actions/workflows/release.yml">
-            <img src="https://github.com/zdz/ServerStatus-Rust/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-        <a href="https://github.com/zdz/ServerStatus-Rust/issues">
-            <img src="https://img.shields.io/github/issues/zdz/ServerStatus-Rust"
+        <a href="https://github.com/8-diagrams/ServerStatusHistory/actions/workflows/release.yml">
+            <img src="https://github.com/8-diagrams/ServerStatusHistory/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+        <a href="https://github.com/8-diagrams/ServerStatusHistory/issues">
+            <img src="https://img.shields.io/github/issues/8-diagrams/ServerStatusHistory"
                   alt="GitHub issues">
         </a>
-        <a href="https://github.com/zdz/ServerStatus-Rust/discussions">
-            <img src="https://img.shields.io/github/discussions/zdz/ServerStatus-Rust"
+        <a href="https://github.com/8-diagrams/ServerStatusHistory/discussions">
+            <img src="https://img.shields.io/github/discussions/8-diagrams/ServerStatusHistory"
                   alt="GitHub Discussions">
         </a>
-        <a href="https://github.com/zdz/ServerStatus-Rust/releases">
-            <img src="https://img.shields.io/github/v/release/zdz/ServerStatus-Rust"
+        <a href="https://github.com/8-diagrams/ServerStatusHistory/releases">
+            <img src="https://img.shields.io/github/v/release/8-diagrams/ServerStatusHistory"
                   alt="GitHub release (latest SemVer)">
         </a>
-        <a href="https://github.com/zdz/ServerStatus-Rust/releases">
-            <img src="https://img.shields.io/github/downloads/zdz/ServerStatus-Rust/total" alt="GitHub all releases">
+        <a href="https://github.com/8-diagrams/ServerStatusHistory/releases">
+            <img src="https://img.shields.io/github/downloads/8-diagrams/ServerStatusHistory/total" alt="GitHub all releases">
         </a>
     </p>
 </div>
@@ -65,15 +65,15 @@
 - 支持 `vnstat` 统计月流量，重启不丢流量数据
 - 支持 `railway` 快速部署
 - 支持 `systemd` 开机自启
-- 其它功能，如 🗺️  见 [wiki](https://github.com/zdz/ServerStatus-Rust/wiki)
+- 其它功能，如 🗺️  见 [wiki](https://github.com/8-diagrams/ServerStatusHistory/wiki)
 
 演示：[ssr.rs](https://ssr.rs) | [cn dns](https://ck.ssr.rs)
 |
-下载：[Releases](https://github.com/zdz/ServerStatus-Rust/releases)
+下载：[Releases](https://github.com/8-diagrams/ServerStatusHistory/releases)
 |
-[Changelog](https://github.com/zdz/ServerStatus-Rust/releases)
+[Changelog](https://github.com/8-diagrams/ServerStatusHistory/releases)
 |
-反馈：[Discussions](https://github.com/zdz/ServerStatus-Rust/discussions)
+反馈：[Discussions](https://github.com/8-diagrams/ServerStatusHistory/discussions)
 
 📚 完整文档迁移至 [doc.ssr.rs](https://doc.ssr.rs)
 
@@ -83,7 +83,7 @@
 
 ### 🍀 主题
 
-如果你觉得你创造/修改的主题还不错，欢迎分享/PR，前端单独部署方法参考 [#37](https://github.com/zdz/ServerStatus-Rust/discussions/37)
+如果你觉得你创造/修改的主题还不错，欢迎分享/PR，前端单独部署方法参考 [#37](https://github.com/8-diagrams/ServerStatusHistory/discussions/37)
 
 <details>
   <summary>ServerStatus-theme 主题</summary>
@@ -92,7 +92,7 @@
 👉 [主题地址](https://github.com/JingBh/ServerStatus-theme)
 支持快速部署一键命令生成
 
-| <img width="1269" alt="image" src="https://github.com/zdz/ServerStatus-Rust/assets/152173/33eb8685-b0ed-4548-92af-8cfdded7d011"> | <img width="596" alt="image" src="https://github.com/zdz/ServerStatus-Rust/assets/152173/15e9c405-6491-4f41-ad0e-68aae96d709c"> |
+| <img width="1269" alt="image" src="https://github.com/8-diagrams/ServerStatusHistory/assets/152173/33eb8685-b0ed-4548-92af-8cfdded7d011"> | <img width="596" alt="image" src="https://github.com/8-diagrams/ServerStatusHistory/assets/152173/15e9c405-6491-4f41-ad0e-68aae96d709c"> |
 |-|-|
 
 [演示：Demo](https://status.jingbh.cloud)
@@ -105,7 +105,7 @@
 👉 [主题地址](https://github.com/orilights/ServerStatus-Theme-Light)
 作者 [@orilights](https://github.com/orilights)
 
-<img width="1836" alt="image" src="https://github.com/zdz/ServerStatus-Rust/assets/152173/35fdd138-31b8-46d0-8ea8-c2d4e7ef2b52">
+<img width="1836" alt="image" src="https://github.com/8-diagrams/ServerStatusHistory/assets/152173/35fdd138-31b8-46d0-8ea8-c2d4e7ef2b52">
 
 [演示：Demo](https://sstl-demo.orilight.top)
 
@@ -154,7 +154,7 @@ ServerStatus-nezha 主题由 [@snowie2000](https://github.com/snowie2000) 修改
 # for CentOS/Debian/Ubuntu x86_64
 mkdir -p /opt/ServerStatus && cd /opt/ServerStatus
 # apt install -y unzip / yum install -y unzip
-wget --no-check-certificate -qO one-touch.sh 'https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/scripts/one-touch.sh'
+wget --no-check-certificate -qO one-touch.sh 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/scripts/one-touch.sh'
 bash -ex one-touch.sh
 # 部署完毕，打开 http://127.0.0.1:8080/ 或 http://<你的IP>:8080/
 # 自定义部署可参照 scripts/one-touch.sh 脚本
@@ -174,7 +174,7 @@ bash -ex one-touch.sh
 
 ```bash
 # 下载脚本
-wget --no-check-certificate -qO status.sh 'https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/scripts/status.sh'
+wget --no-check-certificate -qO status.sh 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/scripts/status.sh'
 
 # 安装 服务端
 bash status.sh -i -s
@@ -228,13 +228,13 @@ help:
 ### 2.4 Railway 部署
 
 懒得配置 `Nginx`，`SSL` 证书？试试
-[在 Railway 部署 Server](https://github.com/zdz/ServerStatus-Rust/wiki/Railway)
+[在 Railway 部署 Server](https://github.com/8-diagrams/ServerStatusHistory/wiki/Railway)
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template/kzT46l?referralCode=pJYbdU)
 
 ### 2.5 Heroku 部署
 
-[如何在 Heroku 上部署 Rust 版 ServerStatus 云探针](https://github.com/zdz/ServerStatus-Rust/blob/master/heroku/README.md)
+[如何在 Heroku 上部署 Rust 版 ServerStatus 云探针](https://github.com/8-diagrams/ServerStatusHistory/blob/master/heroku/README.md)
 
 ## 3. 服务端说明
 
@@ -330,8 +330,8 @@ RUST_BACKTRACE=1 RUST_LOG=trace ./stat_server -c config.toml
 ./stat_server -c config.toml --notify-test
 
 # 🐳 docker 方式
-wget --no-check-certificate -qO docker-compose.yml 'https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/docker-compose.yml'
-wget --no-check-certificate -qO config.toml 'https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/config.toml'
+wget --no-check-certificate -qO docker-compose.yml 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/docker-compose.yml'
+wget --no-check-certificate -qO config.toml 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/config.toml'
 touch stats.json
 docker-compose up -d
 ```
@@ -485,12 +485,12 @@ apk add wget python3 py3-pip gcc python3-dev musl-dev linux-headers
 apk add procps iproute2 coreutils
 python3 -m pip install psutil requests py-cpuinfo
 
-wget --no-check-certificate -qO stat_client.py 'https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/client/stat_client.py'
+wget --no-check-certificate -qO stat_client.py 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/client/stat_client.py'
 
 ## Windows
 # 安装 python 3.10 版本，并设置环境变量
 # 命令行执行 pip install psutil requests
-# 下载 https://raw.githubusercontent.com/zdz/ServerStatus-Rust/master/client/stat_client.py
+# 下载 https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/client/stat_client.py
 pip install psutil requests py-cpuinfo
 
 python3 stat_client.py -h
@@ -538,7 +538,7 @@ python3 stat_client.py -a "http://127.0.0.1:8080/report" -u h1 -p p1 -n
 <details>
   <summary>如何使用自定义主题</summary>
 
-更简单的方式 👉 [#37](https://github.com/zdz/ServerStatus-Rust/discussions/37)
+更简单的方式 👉 [#37](https://github.com/8-diagrams/ServerStatusHistory/discussions/37)
 
 ```nginx
 server {
@@ -579,7 +579,7 @@ cargo install stat_client
 # 按提示安装 rust 编译器
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 yum install -y openssl-devel
-git clone https://github.com/zdz/ServerStatus-Rust.git
+git clone https://github.com/8-diagrams/ServerStatusHistory.git
 cd ServerStatus-Rust
 cargo build --release
 # 编译好的文件目录 target/release

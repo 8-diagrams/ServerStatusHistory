@@ -9,6 +9,9 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 ARTIFACT=""
 CONFIG_SOURCE=""
 START_SERVICE=true
+REGENERATE_AUTH=false
+ADMIN_USER=""
+NEW_ADMIN_PASSWORD=""
 
 log() {
     printf '[deploy] %s\n' "$*"
@@ -31,6 +34,9 @@ Options:
   --config <path>        Install this config.toml. If omitted, preserve the
                          installed config or use config.toml from the ZIP.
   --install-dir <path>   Installation directory (default: /opt/ServerStatus)
+  --regenerate-auth      Generate a new admin password and JWT secret before
+                         restart; admin_user is generated as well.
+  --admin-user <name>    Use this username instead of generating one
   --no-start             Install files but do not enable/start the service
   -h, --help             Show this help
 
@@ -57,6 +63,15 @@ while (($# > 0)); do
             INSTALL_DIR="$2"
             shift 2
             ;;
+        --regenerate-auth)
+            REGENERATE_AUTH=true
+            shift
+            ;;
+        --admin-user)
+            (($# >= 2)) || fail "--admin-user requires a name"
+            ADMIN_USER="$2"
+            shift 2
+            ;;
         --no-start)
             START_SERVICE=false
             shift
@@ -76,6 +91,9 @@ done
 command -v systemctl >/dev/null 2>&1 || fail "systemd/systemctl is required"
 [[ -n "$ARTIFACT" ]] || fail "--artifact is required"
 [[ -f "$ARTIFACT" ]] || fail "artifact not found: $ARTIFACT"
+if [[ -n "$ADMIN_USER" && ! "$ADMIN_USER" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    fail "--admin-user may contain only letters, numbers, dot, underscore and hyphen"
+fi
 if [[ -n "$CONFIG_SOURCE" ]]; then
     [[ -f "$CONFIG_SOURCE" ]] || fail "config not found: $CONFIG_SOURCE"
 fi
@@ -134,6 +152,35 @@ fi
 
 "$BINARY_SOURCE" -c "$SELECTED_CONFIG" -t >/dev/null || fail \
     "configuration validation failed: $SELECTED_CONFIG"
+
+if [[ "$REGENERATE_AUTH" == true ]]; then
+    command -v openssl >/dev/null 2>&1 || fail "openssl is required for --regenerate-auth"
+    AUTH_CONFIG="$STAGE_DIR/config.toml"
+    cp "$SELECTED_CONFIG" "$AUTH_CONFIG"
+    if [[ -z "$ADMIN_USER" ]]; then
+        ADMIN_USER="admin_$(openssl rand -hex 4)"
+    fi
+    NEW_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+    NEW_JWT_SECRET="$(openssl rand -hex 32)"
+
+    set_config_value() {
+        local key="$1"
+        local value="$2"
+        if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$AUTH_CONFIG"; then
+            sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*$|${key} = \"${value}\"|" "$AUTH_CONFIG"
+        else
+            sed -i "1i\\${key} = \"${value}\"" "$AUTH_CONFIG"
+        fi
+    }
+
+    set_config_value "admin_user" "$ADMIN_USER"
+    set_config_value "admin_pass" "$NEW_ADMIN_PASSWORD"
+    set_config_value "jwt_secret" "$NEW_JWT_SECRET"
+    SELECTED_CONFIG="$AUTH_CONFIG"
+    "$BINARY_SOURCE" -c "$SELECTED_CONFIG" -t >/dev/null || fail \
+        "generated authentication configuration failed validation"
+    log "generated new admin credentials and JWT secret"
+fi
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR="$INSTALL_DIR/backups/$TIMESTAMP"
@@ -207,3 +254,8 @@ log "install directory: $INSTALL_DIR"
 log "backup directory: $BACKUP_DIR"
 log "config file: $INSTALL_DIR/config.toml"
 log "history directory: $INSTALL_DIR/data"
+if [[ -n "$NEW_ADMIN_PASSWORD" ]]; then
+    log "new admin username: $ADMIN_USER"
+    log "new admin password: $NEW_ADMIN_PASSWORD"
+    log "save this password now; it is not shown again"
+fi

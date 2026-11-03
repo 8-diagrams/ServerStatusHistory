@@ -93,15 +93,15 @@
       </Progress>
     </div>
     <div v-if="showMetricChart" class="mt-2">
-      <div class="text-xs text-gray-500 mb-1">
-        {{ chartLabel }}
-      </div>
       <StatusChart
         :data="chartHistory"
         :unit="chartUnit"
         :decimals="chartDecimals"
         :max="chartMax"
       />
+      <div class="text-center text-xs text-gray-500 mt-1 break-words" :title="chartLabel">
+        {{ chartLabel }}
+      </div>
     </div>
     <div v-if="server.memory_total !== undefined" class="flex items-center gap-2">
       内存

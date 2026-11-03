@@ -116,7 +116,7 @@ function download_client() {
         say "using cn mirror: coding.net"
         wget --no-check-certificate -qO "client-${arch}-unknown-linux-musl.zip" "https://d0ge-generic.pkg.coding.net/ServerStatus-Rust/releases/client-${arch}-unknown-linux-musl-v{{pkg_version}}.zip?version=v{{pkg_version}}"
     else
-        wget --no-check-certificate -qO "client-${arch}-unknown-linux-musl.zip" "https://github.com/zdz/ServerStatus-Rust/releases/download/v{{pkg_version}}/client-${arch}-unknown-linux-musl.zip"
+        wget --no-check-certificate -qO "client-${arch}-unknown-linux-musl.zip" "https://github.com/8-diagrams/ServerStatusHistory/releases/download/v{{pkg_version}}/client-${arch}-unknown-linux-musl.zip"
     fi
 
     say "download stat_client succ"

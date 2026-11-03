@@ -336,7 +336,7 @@ enabled = false
       sound: "minuet.caf",
       icon: "https://day.app/assets/images/avatar.jpg",
       group: "SSR",
-      url: "https://github.com/zdz/ServerStatus-Rust"
+      url: "https://github.com/8-diagrams/ServerStatusHistory"
 
     }]
   """
