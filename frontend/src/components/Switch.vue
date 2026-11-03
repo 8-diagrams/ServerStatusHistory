@@ -3,7 +3,7 @@
     class="relative w-[40px] h-[20px] rounded-[20px] transition-colors duration-300 inline-block cursor-pointer"
     :class="{
       'bg-[#dcdfe6] dark:bg-[#4c4d4f]': !modelValue,
-      'bg-[#409eff]': modelValue,
+      'bg-[#7455e9]': modelValue,
     }" @click="$emit('update:modelValue', !modelValue)"
   >
     <div

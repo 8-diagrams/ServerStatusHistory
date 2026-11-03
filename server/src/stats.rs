@@ -3,7 +3,7 @@ use anyhow::Result;
 use chrono::{Datelike, Local, Timelike};
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
@@ -400,6 +400,17 @@ impl StatsMgr {
         self.resp_json.lock().unwrap().to_string()
     }
 
+    pub fn get_hosts_catalog(&self) -> serde_json::Value {
+        let data = self.stats_data.lock().unwrap();
+        build_hosts_catalog(&data)
+    }
+
+    pub fn get_hosts(&self, directory: Option<&str>, tags: &[String]) -> serde_json::Value {
+        let data = self.stats_data.lock().unwrap();
+        serde_json::to_value(filter_hosts(&data, directory, tags))
+            .unwrap_or_else(|_| serde_json::json!({"updated": data.updated, "servers": []}))
+    }
+
     pub fn get_history(&self) -> Option<Arc<HistoryService>> {
         self.history.clone()
     }
@@ -438,5 +449,124 @@ impl StatsMgr {
         }
 
         Ok(resp_json)
+    }
+}
+
+fn filter_hosts(data: &StatsResp, directory: Option<&str>, tags: &[String]) -> StatsResp {
+    let normalized_tags = tags
+        .iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<HashSet<_>>();
+    let directory = directory.unwrap_or("default");
+    let servers = data
+        .servers
+        .iter()
+        .filter(|server| {
+            if !normalized_tags.is_empty() {
+                return server
+                    .tags
+                    .iter()
+                    .any(|tag| normalized_tags.contains(&tag.to_lowercase()));
+            }
+            if directory.eq_ignore_ascii_case("default") {
+                server.gid.trim().is_empty()
+            } else {
+                server.gid.eq_ignore_ascii_case(directory)
+            }
+        })
+        .cloned()
+        .collect();
+    StatsResp {
+        updated: data.updated,
+        servers,
+    }
+}
+
+fn build_hosts_catalog(data: &StatsResp) -> serde_json::Value {
+    let mut default_count = 0_usize;
+    let mut directories = BTreeMap::<String, usize>::new();
+    let mut tags = BTreeMap::<String, (String, usize)>::new();
+    for server in &data.servers {
+        let gid = server.gid.trim();
+        if gid.is_empty() {
+            default_count += 1;
+        } else {
+            *directories.entry(gid.to_string()).or_default() += 1;
+        }
+        let mut host_tags = HashSet::new();
+        for tag in &server.tags {
+            let normalized = tag.trim().to_lowercase();
+            if normalized.is_empty() || !host_tags.insert(normalized.clone()) {
+                continue;
+            }
+            let entry = tags.entry(normalized).or_insert_with(|| (tag.trim().to_string(), 0));
+            entry.1 += 1;
+        }
+    }
+    serde_json::json!({
+        "default": {"id": "default", "name": "默认", "count": default_count},
+        "directories": directories.into_iter().map(|(id, count)| {
+            serde_json::json!({"id": id, "name": id, "count": count})
+        }).collect::<Vec<_>>(),
+        "tags": tags.into_values().map(|(name, count)| {
+            serde_json::json!({"name": name, "count": count})
+        }).collect::<Vec<_>>()
+    })
+}
+
+#[cfg(test)]
+mod host_query_tests {
+    use super::*;
+
+    fn stat(name: &str, gid: &str, tags: &[&str]) -> Arc<HostStat> {
+        Arc::new(HostStat {
+            name: name.to_string(),
+            gid: gid.to_string(),
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+            ..HostStat::default()
+        })
+    }
+
+    fn data() -> StatsResp {
+        StatsResp {
+            updated: 42,
+            servers: vec![
+                stat("default-1", "", &["AWS", "MYSQL"]),
+                stat("fintech-1", "FINTECH", &["AWS"]),
+                stat("mail-1", "MAIL", &["MAILSVR"]),
+            ],
+        }
+    }
+
+    #[test]
+    fn no_query_and_default_return_only_hosts_without_gid() {
+        let result = filter_hosts(&data(), None, &[]);
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].name, "default-1");
+    }
+
+    #[test]
+    fn directory_query_is_unique_and_tag_query_uses_or_semantics() {
+        let by_directory = filter_hosts(&data(), Some("FINTECH"), &[]);
+        assert_eq!(by_directory.servers[0].name, "fintech-1");
+
+        let tags = vec!["mysql".to_string(), "MAILSVR".to_string()];
+        let by_tags = filter_hosts(&data(), None, &tags);
+        let names = by_tags
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["default-1", "mail-1"]);
+    }
+
+    #[test]
+    fn catalog_counts_default_directories_and_tags() {
+        let catalog = build_hosts_catalog(&data());
+        assert_eq!(catalog["default"]["count"], 1);
+        assert_eq!(catalog["directories"][0]["id"], "FINTECH");
+        assert_eq!(catalog["tags"][0]["name"], "AWS");
+        assert_eq!(catalog["tags"][0]["count"], 2);
     }
 }

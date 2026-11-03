@@ -1,10 +1,10 @@
 <template>
   <div
-    class="rounded-xl px-4 py-3 relative bg-gray-100"
+    class="rounded-xl border border-[#e9e6ef] bg-white px-4 py-3 relative shadow-sm transition-shadow hover:shadow-md"
   >
     <div class="absolute right-4 top-4 group flex flex-col items-end">
       <StatusIndicator :status="isOnline(server)" class="w-3 h-3" />
-      <div class="hidden group-hover:block p-2 rounded-xl border text-sm bg-gray-100 z-[9999] mt-1 border-gray-400">
+      <div class="hidden group-hover:block p-2 rounded-xl border text-sm bg-white z-[9999] mt-1 border-[#ded9ec] shadow-lg">
         <div class="flex gap-2">
           <div class="flex items-center gap-1">
             IPv4
@@ -38,7 +38,7 @@
       </span>
       <span
         v-for="tag in server.tags || []" :key="tag"
-        class="text-xs bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 whitespace-nowrap"
+        class="text-xs bg-[#f1edff] text-[#6544d5] rounded-md px-2 py-0.5 whitespace-nowrap"
       >
         {{ tag }}
       </span>

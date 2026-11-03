@@ -1,5 +1,5 @@
 use crate::assets::Asset;
-use axum::extract::{Path, Query};
+use axum::extract::{Path, Query, RawQuery};
 use axum::{
     body::Bytes,
     http::{header, header::HeaderMap, StatusCode, Uri},
@@ -29,6 +29,43 @@ pub async fn get_stats_json() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/json")],
         G_STATS_MGR.get().unwrap().get_stats_json(),
     )
+}
+
+/// Return the lightweight navigation catalog used by the new Web UI.
+pub async fn get_hosts_catalog() -> Json<Value> {
+    Json(G_STATS_MGR.get().unwrap().get_hosts_catalog())
+}
+
+/// Return only the live hosts needed by the current directory or tag view.
+/// Repeated `tag` parameters use OR semantics.
+pub async fn get_hosts(RawQuery(raw_query): RawQuery) -> Response {
+    let (directory, tags) = parse_hosts_query(raw_query.as_deref());
+    if directory.is_some() && !tags.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": 400,
+                "message": "directory and tag parameters are mutually exclusive"
+            })),
+        )
+            .into_response();
+    }
+    Json(G_STATS_MGR.get().unwrap().get_hosts(directory.as_deref(), &tags)).into_response()
+}
+
+fn parse_hosts_query(raw_query: Option<&str>) -> (Option<String>, Vec<String>) {
+    let mut directory = None;
+    let mut tags = Vec::new();
+    if let Some(raw_query) = raw_query {
+        for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+            match key.as_ref() {
+                "directory" => directory = Some(value.into_owned()),
+                "tag" => tags.push(value.into_owned()),
+                _ => {}
+            }
+        }
+    }
+    (directory, tags)
 }
 
 #[allow(unused)]
@@ -473,4 +510,16 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
     }
 
     StatusCode::OK
+}
+
+#[cfg(test)]
+mod host_query_tests {
+    use super::parse_hosts_query;
+
+    #[test]
+    fn repeated_tag_parameters_are_preserved() {
+        let (directory, tags) = parse_hosts_query(Some("tag=AWS&tag=MYSQL&tag=FINTECH"));
+        assert!(directory.is_none());
+        assert_eq!(tags, vec!["AWS", "MYSQL", "FINTECH"]);
+    }
 }
