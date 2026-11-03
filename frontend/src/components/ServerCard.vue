@@ -25,8 +25,8 @@
           </div>
         </div>
         <div v-if="server.latest_ts !== undefined">
-          最后上报时间<br>
-          {{ formatTime(server.latest_ts) }}
+          {{ t('lastReportTime') }}<br>
+          {{ formatTime(server.latest_ts, locale) }}
         </div>
       </div>
     </div>
@@ -36,12 +36,12 @@
       </span>
       <img
         v-else
-        :src="`/static/flags/4x3/${server.location.toLowerCase()}.svg`" :alt="`${server.location} flag`"
+        :src="`/static/flags/4x3/${server.location.toLowerCase()}.svg`" :alt="t('flagAlt', { location: server.location })"
         class="h-4 inline-block rounded-sm"
       >
       <img
         v-if="labels.os !== undefined"
-        :src="`/static/os/${osIconName(labels.os)}.svg`" :alt="`${labels.os} os`"
+        :src="`/static/os/${osIconName(labels.os)}.svg`" :alt="t('osAlt', { os: labels.os })"
         class="h-4 inline-block rounded-sm"
       >
       {{ server.alias || server.name }}
@@ -55,19 +55,19 @@
       </span>
     </div>
     <div>
-      运行时间
+      {{ t('uptime') }}
       <span
         :class="{
           'text-red-500': !isOnline(server),
         }"
       >
-        {{ isOnline(server) ? server.uptime : '离线' }}
+        {{ isOnline(server) ? formatUptime(server.uptime) : t('offline') }}
       </span>
     </div>
     <div v-if="!compactMode" class="flex items-center gap-2">
-      负载
+      {{ t('load') }}
       <Bandage v-if="noLoadData">
-        无数据
+        {{ t('noData') }}
       </Bandage>
       <Bandage v-if="server.load !== undefined">
         {{ server.load }}
@@ -104,7 +104,7 @@
       </div>
     </div>
     <div v-if="server.memory_total !== undefined" class="flex items-center gap-2">
-      内存
+      {{ t('memory') }}
       <Progress
         :value="server.memory_used" :max="server.memory_total"
         class="flex-1"
@@ -113,7 +113,7 @@
       </Progress>
     </div>
     <div v-if="server.hdd_total !== undefined" class="flex items-center gap-2">
-      硬盘
+      {{ t('disk') }}
       <Progress
         :value="server.hdd_used" :max="server.hdd_total"
         class="flex-1"
@@ -122,7 +122,7 @@
       </Progress>
     </div>
     <div v-if="server.network_rx !== undefined" class="flex items-center gap-2">
-      网络
+      {{ t('network') }}
       <Bandage class="flex items-center">
         <IconDownload class="w-4 h-4" />{{ formatBytes(server.network_rx, 1) }}/s
       </Bandage>
@@ -131,7 +131,7 @@
       </Bandage>
     </div>
     <div v-if="server.network_in !== undefined && !compactMode" class="flex items-center gap-2">
-      流量
+      {{ t('traffic') }}
       <Bandage class="flex items-center">
         <IconDownload class="w-4 h-4" />{{ formatBytes(server.network_in, 1) }}
       </Bandage>
@@ -156,10 +156,10 @@
         UDP {{ server.udp_count }}
       </Bandage>
       <Bandage v-if="server.process_count !== undefined">
-        进程 {{ server.process_count }}
+        {{ t('process') }} {{ server.process_count }}
       </Bandage>
       <Bandage v-if="server.thread_count !== undefined">
-        线程 {{ server.thread_count }}
+        {{ t('thread') }} {{ server.thread_count }}
       </Bandage>
     </div>
   </div>
@@ -168,6 +168,7 @@
 <script setup lang="ts">
 import type { ChartPoint } from '@/history'
 import type { ServerData } from '@/types'
+import { formatUptime, useI18n } from '@/i18n'
 import { formatBytes, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
 
 const props = defineProps<{
@@ -182,6 +183,7 @@ const props = defineProps<{
 }>()
 
 const StatusChart = defineAsyncComponent(() => import('@/components/StatusChart.vue'))
+const { locale, t } = useI18n()
 
 const labels = computed(() => parseLabels(props.server.labels))
 const noLoadData = computed(() => hasLoadData(props.server))

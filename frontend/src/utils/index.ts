@@ -10,15 +10,16 @@ export function formatBytes(bytes: number, decimals = 2) {
   return `${Number.parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`
 }
 
-export function formatTime(seconds: number) {
-  const date = new Date(seconds * 1000)
-  const year = date.getFullYear()
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  const day = date.getDate().toString().padStart(2, '0')
-  const hour = date.getHours().toString().padStart(2, '0')
-  const minute = date.getMinutes().toString().padStart(2, '0')
-  const second = date.getSeconds().toString().padStart(2, '0')
-  return `${year}/${month}/${day} ${hour}:${minute}:${second}`
+export function formatTime(seconds: number, locale?: string) {
+  return new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date(seconds * 1000))
 }
 
 export function isOnline(server: ServerData) {

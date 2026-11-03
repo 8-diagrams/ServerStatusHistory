@@ -16,8 +16,8 @@
           </div>
         </div>
         <div v-if="server.latest_ts !== undefined">
-          最后上报时间<br>
-          {{ formatTime(server.latest_ts) }}
+          {{ t('lastReportTime') }}<br>
+          {{ formatTime(server.latest_ts, locale) }}
         </div>
       </div>
     </div>
@@ -26,11 +26,11 @@
         {{ server.location }}
       </span>
       <img
-        v-else :src="`/static/flags/4x3/${server.location.toLowerCase()}.svg`" :alt="`${server.location} flag`"
+        v-else :src="`/static/flags/4x3/${server.location.toLowerCase()}.svg`" :alt="t('flagAlt', { location: server.location })"
         class="h-4 inline-block rounded-sm"
       >
       <img
-        v-if="labels.os !== undefined" :src="`/static/os/${osIconName(labels.os)}.svg`" :alt="`${labels.os} os`"
+        v-if="labels.os !== undefined" :src="`/static/os/${osIconName(labels.os)}.svg`" :alt="t('osAlt', { os: labels.os })"
         class="h-4 inline-block rounded-sm"
       >
       <span class="whitespace-nowrap overflow-ellipsis">
@@ -43,18 +43,18 @@
         {{ tag }}
       </span>
       <Bandage>
-        运行时间
+        {{ t('uptime') }}
         <span
           :class="{
             'text-red-500': !isOnline(server),
           }"
         >
-          {{ isOnline(server) ? server.uptime : '离线' }}
+          {{ isOnline(server) ? formatUptime(server.uptime) : t('offline') }}
         </span>
       </Bandage>
       <template v-if="!compactMode">
         <Bandage v-if="noLoadData">
-          无负载数据
+          {{ t('noLoadData') }}
         </Bandage>
         <Bandage v-if="server.load !== undefined">
           {{ server.load }}
@@ -100,10 +100,10 @@
         </Bandage>
       </template>
       <Bandage class="flex items-center">
-        下载 <IconDownload class="w-4 h-4" />{{ formatBytes(server.network_in, 1) }}
+        {{ t('download') }} <IconDownload class="w-4 h-4" />{{ formatBytes(server.network_in, 1) }}
       </Bandage>
       <Bandage class="flex items-center">
-        上传 <IconUpload class="w-4 h-4" />{{ formatBytes(server.network_out, 1) }}
+        {{ t('upload') }} <IconUpload class="w-4 h-4" />{{ formatBytes(server.network_out, 1) }}
       </Bandage>
       <Bandage v-if="server.tcp_count !== undefined">
         TCP {{ server.tcp_count }}
@@ -112,10 +112,10 @@
         UDP {{ server.udp_count }}
       </Bandage>
       <Bandage v-if="server.process_count !== undefined">
-        进程 {{ server.process_count }}
+        {{ t('process') }} {{ server.process_count }}
       </Bandage>
       <Bandage v-if="server.thread_count !== undefined">
-        线程 {{ server.thread_count }}
+        {{ t('thread') }} {{ server.thread_count }}
       </Bandage>
       <Bandage v-if="server.swap_total !== undefined">
         SWAP {{ formatBytes(server.swap_used * 1024) }} / {{ formatBytes(server.swap_total * 1024) }}
@@ -126,6 +126,7 @@
 
 <script setup lang="ts">
 import type { ServerData } from '@/types'
+import { formatUptime, useI18n } from '@/i18n'
 import { formatBytes, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
 
 const props = defineProps<{
@@ -135,4 +136,5 @@ const props = defineProps<{
 
 const labels = computed(() => parseLabels(props.server.labels))
 const noLoadData = computed(() => hasLoadData(props.server))
+const { locale, t } = useI18n()
 </script>

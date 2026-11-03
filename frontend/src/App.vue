@@ -8,76 +8,83 @@
           </div>
           <div>
             <h1 class="text-xl font-bold tracking-tight sm:text-2xl">
-              服务器监控
+              {{ t('appTitle') }}
             </h1><p class="text-xs text-gray-400">
               ServerStatus History
             </p>
           </div>
         </div>
         <div class="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-sm">
+          <label class="flex items-center gap-2 font-medium text-gray-600">
+            <span>{{ t('language') }}</span><select v-model="locale" class="rounded-lg border border-[#ded9ec] bg-white px-2 py-1.5 outline-none">
+              <option v-for="option in languageOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
           <div class="flex items-center gap-2">
-            <span class="font-medium text-gray-600">布局模式</span><div class="flex overflow-hidden rounded-lg border border-[#ded9ec] bg-white p-0.5">
-              <button v-for="mode in layoutModes" :key="mode.value" class="rounded-md p-1.5 transition-colors" :class="settings.layout === mode.value ? 'bg-[#7455e9] text-white' : 'text-gray-400 hover:bg-[#f1edff] hover:text-[#6748d8]'" :title="mode.label" @click="settings.layout = mode.value">
+            <span class="font-medium text-gray-600">{{ t('layoutMode') }}</span><div class="flex overflow-hidden rounded-lg border border-[#ded9ec] bg-white p-0.5">
+              <button v-for="mode in layoutModes" :key="mode.value" class="rounded-md p-1.5 transition-colors" :class="settings.layout === mode.value ? 'bg-[#7455e9] text-white' : 'text-gray-400 hover:bg-[#f1edff] hover:text-[#6748d8]'" :title="t(mode.labelKey)" @click="settings.layout = mode.value">
                 <IconLayoutGrid v-if="mode.value === 'grid'" class="h-5 w-5" /><IconLayoutFlex v-else-if="mode.value === 'flex'" class="h-5 w-5" /><IconLayoutList v-else class="h-5 w-5" />
               </button>
             </div>
           </div>
-          <label class="flex items-center gap-2 font-medium text-gray-600">精简<Switch v-model="settings.compactMode" /></label>
-          <label class="flex items-center gap-2 font-medium text-gray-600">趋势图<Switch v-model="settings.showMetricChart" /></label>
-          <select v-if="settings.showMetricChart" v-model="settings.chartMetric" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" aria-label="趋势指标">
+          <label class="flex items-center gap-2 font-medium text-gray-600">{{ t('compact') }}<Switch v-model="settings.compactMode" /></label>
+          <label class="flex items-center gap-2 font-medium text-gray-600">{{ t('trendChart') }}<Switch v-model="settings.showMetricChart" /></label>
+          <select v-if="settings.showMetricChart" v-model="settings.chartMetric" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" :aria-label="t('trendMetric')">
             <option v-for="option in METRIC_OPTIONS" :key="option.key" :value="option.key">
-              {{ option.label }}
+              {{ t(option.labelKey) }}
             </option>
           </select>
-          <select v-if="settings.showMetricChart" v-model="settings.chartHistoryKeep" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" aria-label="趋势范围">
+          <select v-if="settings.showMetricChart" v-model="settings.chartHistoryKeep" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" :aria-label="t('trendRange')">
             <option value="300">
-              5 分钟
+              {{ t('range5Minutes') }}
             </option><option value="3600">
-              1 小时
+              {{ t('range1Hour') }}
             </option><option value="21600">
-              6 小时
+              {{ t('range6Hours') }}
             </option><option value="86400">
-              24 小时
+              {{ t('range24Hours') }}
             </option><option value="604800">
-              7 天
+              {{ t('range7Days') }}
             </option><option value="2592000">
-              30 天
+              {{ t('range30Days') }}
             </option>
           </select>
         </div>
       </div>
     </header>
     <div v-if="error" class="mx-auto mt-4 w-fit rounded-lg bg-red-50 px-4 py-2 text-sm text-red-700">
-      数据加载失败，请刷新页面或检查服务端状态
+      {{ t('loadError') }}
     </div>
     <div class="mx-auto flex max-w-[1800px] flex-col lg:flex-row">
       <aside class="shrink-0 border-b border-[#ebe8f2] bg-white p-4 lg:sticky lg:top-[65px] lg:min-h-[calc(100vh-65px)] lg:w-64 lg:border-b-0 lg:border-r">
         <div>
-          <div class="mb-2 px-2 text-xs font-bold uppercase tracking-wider text-gray-400">
-            主机目录
-          </div><div class="space-y-1">
+          <button class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm" :class="settings.directoryFilter === 'all' ? 'bg-[#f1edff] font-semibold text-[#6544d5]' : 'font-semibold text-gray-700 hover:bg-[#f8f6ff]'" @click="selectDirectory('all')">
+            <span class="flex min-w-0 items-center gap-2"><span class="text-[#7455e9]">▾</span><span class="truncate">{{ t('allHosts') }}</span></span><span class="ml-2 rounded-full bg-[#f5f3f9] px-2 py-0.5 text-xs text-gray-500">{{ allDirectory.count }}</span>
+          </button><div class="ml-5 mt-1 space-y-1 border-l border-[#e4e0eb] pl-2">
             <button v-for="directory in directories" :key="directory.id" class="flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm" :class="settings.directoryFilter === directory.id ? 'bg-[#f1edff] font-semibold text-[#6544d5]' : 'text-gray-600 hover:bg-[#f8f6ff]'" @click="selectDirectory(directory.id)">
-              <span class="flex min-w-0 items-center gap-2"><span class="text-[#a79bbf]">{{ directory.id === 'default' ? '⌄' : '├' }}</span><span class="truncate">{{ directory.name }}</span></span><span class="ml-2 rounded-full bg-[#f5f3f9] px-2 py-0.5 text-xs text-gray-500">{{ directory.count }}</span>
+              <span class="flex min-w-0 items-center gap-2"><span class="text-[#a79bbf]">├</span><span class="truncate">{{ directory.name }}</span></span><span class="ml-2 rounded-full bg-[#f5f3f9] px-2 py-0.5 text-xs text-gray-500">{{ directory.count }}</span>
             </button>
           </div><p class="mt-4 rounded-lg bg-[#faf8ff] px-3 py-2 text-xs leading-5 text-gray-500">
-            目录是唯一归属关系；未设置 gid 的主机进入“默认”。
+            {{ t('directoryHelp') }}
           </p>
         </div>
         <div class="mt-6 border-t border-[#ebe8f2] pt-5">
           <div class="flex items-center justify-between px-2">
             <div class="text-xs font-bold uppercase tracking-wider text-gray-400">
-              标签筛选 · 多选
+              {{ t('tagFilter') }}
             </div><button v-if="settings.selectedTags.length" class="text-xs font-medium text-[#7455e9]" @click="clearTags">
-              清除
+              {{ t('clear') }}
             </button>
           </div><p class="mt-2 px-2 text-xs leading-5 text-gray-500">
-            标签附加在当前目录下；多选时命中任意标签即展示（OR），不选则不过滤。
+            {{ t('tagHelp') }}
           </p><div class="mt-3 flex flex-wrap gap-2">
             <button v-for="tag in availableTags" :key="tag.name" class="rounded-lg border px-3 py-2 text-sm transition-colors" :class="isTagSelected(tag.name) ? 'border-[#7455e9] bg-[#7455e9] text-white shadow-sm' : 'border-[#e4e0eb] bg-white text-gray-600 hover:border-[#a994ee]'" @click="toggleTag(tag.name)">
               {{ tag.name }} <span class="ml-1 opacity-70">{{ tag.count }}</span><span v-if="isTagSelected(tag.name)" class="ml-1">✓</span>
             </button>
           </div><div v-if="availableTags.length === 0" class="mt-3 rounded-lg bg-gray-50 px-3 py-4 text-center text-sm text-gray-400">
-            暂无标签
+            {{ t('noTags') }}
           </div>
         </div>
       </aside>
@@ -92,11 +99,11 @@
               {{ viewDescription }}
             </p>
           </div><div class="flex gap-2 text-xs">
-            <span class="rounded-lg border border-[#ebe8f2] bg-white px-3 py-2 text-gray-500"><strong class="text-[#24212d]">{{ onlineHostCount }}</strong> 在线</span><span class="rounded-lg border border-[#ebe8f2] bg-white px-3 py-2 text-gray-500"><strong class="text-[#24212d]">{{ uniqueHostCount - onlineHostCount }}</strong> 离线</span>
+            <span class="rounded-lg border border-[#ebe8f2] bg-white px-3 py-2 text-gray-500"><strong class="text-[#24212d]">{{ onlineHostCount }}</strong> {{ t('online') }}</span><span class="rounded-lg border border-[#ebe8f2] bg-white px-3 py-2 text-gray-500"><strong class="text-[#24212d]">{{ uniqueHostCount - onlineHostCount }}</strong> {{ t('offline') }}</span>
           </div>
         </div>
         <div v-if="loading || loadingView" class="rounded-xl border border-[#ebe8f2] bg-white px-5 py-12 text-center text-gray-400">
-          正在加载主机数据…
+          {{ t('loadingHosts') }}
         </div>
         <Transition v-else name="popup-bottom">
           <div class="space-y-6">
@@ -107,18 +114,22 @@
                 </h3><span class="rounded-full bg-[#f1edff] px-2 py-0.5 text-xs font-medium text-[#6544d5]">{{ group.servers.length }}</span>
               </div><div :class="{ 'grid gap-4': settings.layout === 'grid', 'flex flex-wrap gap-4': settings.layout === 'flex', 'flex flex-col gap-3': settings.layout === 'list' }" :style="settings.layout === 'grid' ? { gridTemplateColumns: `repeat(${serverCardCount}, minmax(0, 1fr))` } : undefined">
                 <template v-if="settings.layout === 'grid' || settings.layout === 'flex'">
-                  <ServerCard v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" :show-metric-chart="settings.showMetricChart" :chart-history="metricHistories[server.name] || []" :chart-label="selectedMetric.label" :chart-unit="selectedMetric.unit" :chart-decimals="selectedMetric.decimals" :chart-max="selectedMetric.max" :class="settings.layout === 'flex' ? 'min-w-[300px] flex-1' : ''" />
+                  <ServerCard v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" :show-metric-chart="settings.showMetricChart" :chart-history="metricHistories[server.name] || []" :chart-label="t(selectedMetric.labelKey)" :chart-unit="selectedMetric.unit" :chart-decimals="selectedMetric.decimals" :chart-max="selectedMetric.max" :class="settings.layout === 'flex' ? 'min-w-[300px] flex-1' : ''" />
                 </template><template v-else>
                   <ServerItem v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" />
                 </template>
               </div>
             </section><div v-if="serverGroups.length === 0" class="rounded-xl border border-[#ebe8f2] bg-white px-5 py-12 text-center text-gray-400">
-              当前条件下没有主机
+              {{ t('noHosts') }}
             </div>
           </div>
         </Transition>
       </main>
     </div>
+    <footer class="w-full border-t border-[#ebe8f2] bg-white py-4 text-center text-sm text-gray-400">
+      {{ t('poweredBy') }} <a class="text-[#7455e9]" href="https://github.com/8-diagrams/ServerStatusHistory" target="_blank" rel="noreferrer">ServerStatus-Rust</a>.
+      {{ t('theme') }} <a class="text-[#7455e9]" href="https://github.com/orilights/ServerStatus-Theme-Light" target="_blank" rel="noreferrer">Light</a> {{ t('by') }} <a class="text-[#7455e9]" href="https://orilight.top/" target="_blank" rel="noreferrer">OriLight</a>
+    </footer>
   </div>
 </template>
 
@@ -126,6 +137,7 @@
 import { useLocalStorage, useWindowSize } from '@vueuse/core'
 import type { ChartPoint, MetricKey } from './history'
 import { METRIC_OPTIONS, appendLiveMetrics, ensureMetricHistory, localMetricHistory, metricOption } from './history'
+import { useI18n } from './i18n'
 import type { ServerData } from './types'
 
 interface CatalogDirectory { id: string; name: string; count: number }
@@ -138,7 +150,12 @@ const CARD_WIDTH = 350
 const MIN_FETCH_INTERVAL = 500
 const HISTORY_RETRY_INTERVAL = 5 * 60 * 1000
 const { width: windowWidth } = useWindowSize()
-const layoutModes = [{ value: 'grid' as const, label: '网格布局' }, { value: 'flex' as const, label: '自适应布局' }, { value: 'list' as const, label: '列表布局' }]
+const { languageOptions, locale, t } = useI18n()
+const layoutModes = [
+  { value: 'grid' as const, labelKey: 'layoutGrid' as const },
+  { value: 'flex' as const, labelKey: 'layoutAdaptive' as const },
+  { value: 'list' as const, labelKey: 'layoutList' as const },
+]
 const settings = useLocalStorage('sstl-settings', { layout: 'grid' as 'grid' | 'flex' | 'list', compactMode: false, directoryFilter: 'default', selectedTags: [] as string[], showMetricChart: false, chartMetric: 'cpu' as MetricKey, chartHistoryKeep: 300 }, { mergeDefaults: true })
 const catalog = ref<HostCatalog>()
 const serverData = ref<{ updated: number; servers: ServerData[] }>()
@@ -155,21 +172,29 @@ const historyRequests = new Map<string, number>()
 let requestVersion = 0
 const serverCardCount = computed(() => Math.max(1, Math.floor((windowWidth.value - 300) / CARD_WIDTH)))
 const selectedMetric = computed(() => metricOption(settings.value.chartMetric as MetricKey))
+const allDirectory = computed<CatalogDirectory>(() => ({
+  id: 'all',
+  name: t('allHosts'),
+  count: catalog.value
+    ? catalog.value.default.count + catalog.value.directories.reduce((sum, item) => sum + item.count, 0)
+    : 0,
+}))
 const directories = computed(() => {
   if (!catalog.value)
-    return [{ id: 'all', name: '全部机器', count: 0 }, { id: 'default', name: '默认', count: 0 }]
-  const total = catalog.value.default.count + catalog.value.directories.reduce((sum, item) => sum + item.count, 0)
-  return [{ id: 'all', name: '全部机器', count: total }, catalog.value.default, ...catalog.value.directories]
+    return [{ id: 'default', name: t('defaultDirectory'), count: 0 }]
+  return [{ ...catalog.value.default, name: t('defaultDirectory') }, ...catalog.value.directories]
 })
 const availableTags = computed(() => catalog.value?.tags || [])
 const currentServers = computed(() => serverData.value?.servers || [])
 const uniqueHostCount = computed(() => currentServers.value.length)
 const onlineHostCount = computed(() => currentServers.value.filter(server => server.online4 || server.online6).length)
-const currentDirectory = computed(() => directories.value.find(item => item.id === settings.value.directoryFilter))
-const currentViewTitle = computed(() => currentDirectory.value?.name || '默认')
+const currentDirectory = computed(() => settings.value.directoryFilter === 'all'
+  ? allDirectory.value
+  : directories.value.find(item => item.id === settings.value.directoryFilter))
+const currentViewTitle = computed(() => currentDirectory.value?.name || t('defaultDirectory'))
 const viewDescription = computed(() => settings.value.selectedTags.length
-  ? `当前目录 AND（${settings.value.selectedTags.join(' OR ')}）`
-  : '当前目录内的全部主机；可从左侧附加标签筛选。')
+  ? t('directoryTagDescription', { tags: settings.value.selectedTags.join(' OR ') })
+  : t('directoryAllDescription'))
 const serverGroups = computed(() => currentServers.value.length
   ? [{ key: settings.value.directoryFilter, label: '', servers: currentServers.value }]
   : [])
@@ -269,7 +294,7 @@ function createLegacyCatalog(servers: ServerData[]): HostCatalog {
     }
   }
   return {
-    default: { id: 'default', name: '默认', count: defaultCount },
+    default: { id: 'default', name: 'default', count: defaultCount },
     directories: [...counts].map(([id, count]) => ({ id, name: id, count })),
     tags: [...tags.values()].sort((a, b) => a.name.localeCompare(b.name)),
   }

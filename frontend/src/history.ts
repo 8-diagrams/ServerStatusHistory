@@ -1,4 +1,5 @@
 import type { ServerData } from '@/types'
+import type { MessageKey } from '@/i18n'
 
 export interface ChartPoint { name: number; value: [number, number] }
 export type MetricKey =
@@ -11,7 +12,7 @@ export type MetricKey =
 
 export interface MetricOption {
   key: MetricKey
-  label: string
+  labelKey: MessageKey
   unit: string
   decimals: number
   max?: number
@@ -48,14 +49,14 @@ function percent(used: number | undefined, total: number | undefined) {
 }
 
 function directMetric(key: MetricKey,
-  label: string,
+  labelKey: MessageKey,
   unit: string,
   field: keyof ServerData,
   decimals = 1,
   max?: number): MetricOption {
   return {
     key,
-    label,
+    labelKey,
     unit,
     decimals,
     max,
@@ -66,13 +67,13 @@ function directMetric(key: MetricKey,
 }
 
 export const METRIC_OPTIONS: MetricOption[] = [
-  directMetric('cpu', 'CPU', '%', 'cpu', 1, 100),
-  directMetric('load_1', '1 分钟负载', '', 'load_1', 2),
-  directMetric('load_5', '5 分钟负载', '', 'load_5', 2),
-  directMetric('load_15', '15 分钟负载', '', 'load_15', 2),
+  directMetric('cpu', 'metricCpu', '%', 'cpu', 1, 100),
+  directMetric('load_1', 'metricLoad1', '', 'load_1', 2),
+  directMetric('load_5', 'metricLoad5', '', 'load_5', 2),
+  directMetric('load_15', 'metricLoad15', '', 'load_15', 2),
   {
     key: 'memory_percent',
-    label: '内存使用率',
+    labelKey: 'metricMemoryPercent',
     unit: '%',
     decimals: 1,
     max: 100,
@@ -82,7 +83,7 @@ export const METRIC_OPTIONS: MetricOption[] = [
   },
   {
     key: 'swap_percent',
-    label: 'Swap 使用率',
+    labelKey: 'metricSwapPercent',
     unit: '%',
     decimals: 1,
     max: 100,
@@ -92,7 +93,7 @@ export const METRIC_OPTIONS: MetricOption[] = [
   },
   {
     key: 'hdd_percent',
-    label: '磁盘使用率',
+    labelKey: 'metricDiskPercent',
     unit: '%',
     decimals: 1,
     max: 100,
@@ -100,11 +101,11 @@ export const METRIC_OPTIONS: MetricOption[] = [
     liveValue: server => percent(server.hdd_used, server.hdd_total),
     historyValue: values => percent(values.hdd_used, values.hdd_total),
   },
-  directMetric('network_rx', '下载速率', 'B/s', 'network_rx', 0),
-  directMetric('network_tx', '上传速率', 'B/s', 'network_tx', 0),
+  directMetric('network_rx', 'metricNetworkRx', 'B/s', 'network_rx', 0),
+  directMetric('network_tx', 'metricNetworkTx', 'B/s', 'network_tx', 0),
   {
     key: 'traffic_in',
-    label: '区间下载流量',
+    labelKey: 'metricTrafficIn',
     unit: 'B',
     decimals: 0,
     dependencies: ['traffic_in'],
@@ -113,23 +114,23 @@ export const METRIC_OPTIONS: MetricOption[] = [
   },
   {
     key: 'traffic_out',
-    label: '区间上传流量',
+    labelKey: 'metricTrafficOut',
     unit: 'B',
     decimals: 0,
     dependencies: ['traffic_out'],
     liveValue: () => undefined,
     historyValue: values => values.traffic_out,
   },
-  directMetric('tcp', 'TCP 连接', '', 'tcp_count', 0),
-  directMetric('udp', 'UDP 连接', '', 'udp_count', 0),
-  directMetric('process', '进程数', '', 'process_count', 0),
-  directMetric('thread', '线程数', '', 'thread_count', 0),
-  directMetric('time_10010', '联通延迟', 'ms', 'time_10010', 0),
-  directMetric('time_189', '电信延迟', 'ms', 'time_189', 0),
-  directMetric('time_10086', '移动延迟', 'ms', 'time_10086', 0),
-  directMetric('ping_10010', '联通丢包', '%', 'ping_10010', 1, 100),
-  directMetric('ping_189', '电信丢包', '%', 'ping_189', 1, 100),
-  directMetric('ping_10086', '移动丢包', '%', 'ping_10086', 1, 100),
+  directMetric('tcp', 'metricTcp', '', 'tcp_count', 0),
+  directMetric('udp', 'metricUdp', '', 'udp_count', 0),
+  directMetric('process', 'metricProcess', '', 'process_count', 0),
+  directMetric('thread', 'metricThread', '', 'thread_count', 0),
+  directMetric('time_10010', 'metricUnicomLatency', 'ms', 'time_10010', 0),
+  directMetric('time_189', 'metricTelecomLatency', 'ms', 'time_189', 0),
+  directMetric('time_10086', 'metricMobileLatency', 'ms', 'time_10086', 0),
+  directMetric('ping_10010', 'metricUnicomLoss', '%', 'ping_10010', 1, 100),
+  directMetric('ping_189', 'metricTelecomLoss', '%', 'ping_189', 1, 100),
+  directMetric('ping_10086', 'metricMobileLoss', '%', 'ping_10086', 1, 100),
 ]
 
 const options = new Map(METRIC_OPTIONS.map(option => [option.key, option]))
