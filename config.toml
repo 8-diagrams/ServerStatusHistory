@@ -23,10 +23,11 @@ admin_pass = ""
 # 或国家缩写，如 cn us 等等，所有国家见目录 web/static/flags
 # 自定义键值信息 labels = "os=centos;ndd=2022/11/25;spec=2C/4G/60G;"
 # 多标签分组 tags = ["AWS", "MAILSVR", "MYSQL", "FINTECH"]
+# 固定主机可用 gid 指定唯一目录；同一主机只能属于一个目录
 # os 标签可选，不填则使用上报数据，ndd(next due date) 下次续费时间, spec 为主机规格
 # os 可用值 centos debian ubuntu alpine pi arch windows linux macos android freebsd
 hosts = [
-  {name = "h1", password = "p1", alias = "n1", location = "🏠", type = "kvm", labels = "os=freebsd;ndd=2022/11/25;spec=2C/4G/60G;", tags = ["AWS", "MYSQL"]},
+  {name = "h1", password = "p1", gid = "FINTECH", alias = "n1", location = "🏠", type = "kvm", labels = "os=freebsd;ndd=2022/11/25;spec=2C/4G/60G;", tags = ["AWS", "MYSQL"]},
   {name = "h2", password = "p2", alias = "n2", location = "🏢", type = "kvm", disabled = false},
   {name = "h3", password = "p3", alias = "n3", location = "🏡", type = "kvm", monthstart = 1},
   {name = "h4", password = "p4", alias = "n4", location = "cn", type = "kvm", notify = true, labels = "ndd=2022/11/25;spec=2C/4G/60G;"},

@@ -34,17 +34,6 @@
         </div>
       </div>
       <label class="flex items-center gap-2">
-        <span class="font-medium">标签</span>
-        <select v-model="settings.tagFilter" class="max-w-[150px] rounded border px-2 py-1">
-          <option value="">全部</option>
-          <option v-for="tag in availableTags" :key="tag" :value="tag">{{ tag }}</option>
-        </select>
-      </label>
-      <label v-if="availableTags.length" class="flex items-center gap-2">
-        <span class="font-medium">按标签分组</span>
-        <Switch v-model="settings.groupByTag" />
-      </label>
-      <label class="flex items-center gap-2">
         <span class="font-medium">精简</span>
         <Switch v-model="settings.compactMode" />
       </label>
@@ -82,59 +71,121 @@
   <div v-if="error" class="w-fit mx-auto my-2 rounded-lg bg-gray-100 px-4 py-2">
     数据加载失败，请尝试刷新页面或检查 ServerStatus 服务端状态
   </div>
-  <Transition name="popup-bottom">
-    <div v-if="serverData" class="flex flex-col gap-y-5">
-      <section v-for="group in serverGroups" :key="group.key">
-        <div v-if="settings.groupByTag" class="flex items-center gap-2 mb-2">
-          <h2 class="font-bold text-lg">
-            {{ group.label }}
-          </h2>
-          <span class="text-xs text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
-            {{ group.servers.length }} 台
-          </span>
-        </div>
-        <div
-          :class="{
-            'grid gap-x-4 gap-y-3': settings.layout === 'grid',
-            'flex flex-wrap gap-x-4 gap-y-3': settings.layout === 'flex',
-            'flex flex-col gap-y-3': settings.layout === 'list',
-          }"
-          :style="{
-            gridTemplateColumns: `repeat(${serverCardCount}, minmax(0, 1fr))`,
-          }"
-        >
-          <template v-if="settings.layout === 'grid' || settings.layout === 'flex'">
-            <ServerCard
-              v-for="server in group.servers" :key="`${group.key}:${server.name}`"
-              :server="server"
-              :compact-mode="settings.compactMode"
-              :show-metric-chart="settings.showMetricChart"
-              :chart-history="metricHistories[server.name] || []"
-              :chart-label="selectedMetric.label"
-              :chart-unit="selectedMetric.unit"
-              :chart-decimals="selectedMetric.decimals"
-              :chart-max="selectedMetric.max"
-              :class="{
-                'col-span-1': settings.layout === 'grid',
-                'flex-1 min-w-[300px]': settings.layout === 'flex',
-              }"
-            />
-          </template>
-          <template v-if="settings.layout === 'list'">
-            <ServerItem
-              v-for="server in group.servers" :key="`${group.key}:${server.name}`"
-              :server="server"
-              :compact-mode="settings.compactMode"
-              class="col-span-1"
-            />
-          </template>
-        </div>
-      </section>
-      <div v-if="serverGroups.length === 0" class="text-center text-gray-500 py-8">
-        当前标签下没有服务器
+  <div v-if="serverData" class="flex flex-col gap-4 lg:flex-row lg:items-start">
+    <aside class="w-full shrink-0 rounded-xl border bg-white p-3 shadow-sm lg:sticky lg:top-16 lg:w-56">
+      <div class="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+        主机视图
       </div>
-    </div>
-  </Transition>
+      <div class="flex gap-2 lg:flex-col">
+        <button
+          class="flex flex-1 items-center justify-between rounded-lg px-3 py-2 text-left transition-colors lg:flex-none"
+          :class="settings.viewMode === 'directory' ? 'bg-gray-800 text-white' : 'hover:bg-gray-100'"
+          @click="switchView('directory')"
+        >
+          <span>目录</span>
+          <span class="text-xs opacity-70">{{ directories.length }}</span>
+        </button>
+        <button
+          class="flex flex-1 items-center justify-between rounded-lg px-3 py-2 text-left transition-colors lg:flex-none"
+          :class="settings.viewMode === 'tag' ? 'bg-gray-800 text-white' : 'hover:bg-gray-100'"
+          @click="switchView('tag')"
+        >
+          <span>标签</span>
+          <span class="text-xs opacity-70">{{ availableTags.length }}</span>
+        </button>
+      </div>
+      <div class="mt-3 border-t pt-3">
+        <button
+          class="mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors"
+          :class="isBrowseAll ? 'bg-gray-100 font-medium' : 'hover:bg-gray-100'"
+          @click="clearBrowseSelection"
+        >
+          <span>{{ settings.viewMode === 'tag' ? '全部标签' : '全部主机' }}</span>
+          <span class="text-xs text-gray-500">{{ serverData.servers.length }}</span>
+        </button>
+        <template v-if="settings.viewMode === 'directory'">
+          <button
+            v-for="directory in directories" :key="directory.key"
+            class="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors"
+            :class="settings.directoryFilter === directory.key ? 'bg-blue-50 font-medium text-blue-700' : 'hover:bg-gray-100'"
+            @click="settings.directoryFilter = directory.key"
+          >
+            <span class="truncate">{{ directory.label }}</span>
+            <span class="ml-2 text-xs text-gray-500">{{ directory.count }}</span>
+          </button>
+        </template>
+        <template v-else>
+          <button
+            v-for="tag in availableTags" :key="tag"
+            class="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors"
+            :class="settings.tagFilter.toLocaleLowerCase() === tag.toLocaleLowerCase() ? 'bg-blue-50 font-medium text-blue-700' : 'hover:bg-gray-100'"
+            @click="settings.tagFilter = tag"
+          >
+            <span class="truncate">{{ tag }}</span>
+            <span class="ml-2 text-xs text-gray-500">{{ tagCounts[tag.toLocaleLowerCase()] || 0 }}</span>
+          </button>
+          <div v-if="availableTags.length === 0" class="px-3 py-2 text-sm text-gray-500">
+            暂无标签
+          </div>
+        </template>
+      </div>
+    </aside>
+    <main class="min-w-0 flex-1">
+      <Transition name="popup-bottom">
+        <div class="flex flex-col gap-y-5">
+          <section v-for="group in serverGroups" :key="group.key">
+            <div v-if="group.label" class="mb-2 flex items-center gap-2">
+              <h2 class="font-bold text-lg">
+                {{ group.label }}
+              </h2>
+              <span class="text-xs text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
+                {{ group.servers.length }} 台
+              </span>
+            </div>
+            <div
+              :class="{
+                'grid gap-x-4 gap-y-3': settings.layout === 'grid',
+                'flex flex-wrap gap-x-4 gap-y-3': settings.layout === 'flex',
+                'flex flex-col gap-y-3': settings.layout === 'list',
+              }"
+              :style="{
+                gridTemplateColumns: `repeat(${serverCardCount}, minmax(0, 1fr))`,
+              }"
+            >
+              <template v-if="settings.layout === 'grid' || settings.layout === 'flex'">
+                <ServerCard
+                  v-for="server in group.servers" :key="`${group.key}:${server.name}`"
+                  :server="server"
+                  :compact-mode="settings.compactMode"
+                  :show-metric-chart="settings.showMetricChart"
+                  :chart-history="metricHistories[server.name] || []"
+                  :chart-label="selectedMetric.label"
+                  :chart-unit="selectedMetric.unit"
+                  :chart-decimals="selectedMetric.decimals"
+                  :chart-max="selectedMetric.max"
+                  :class="{
+                    'col-span-1': settings.layout === 'grid',
+                    'flex-1 min-w-[300px]': settings.layout === 'flex',
+                  }"
+                />
+              </template>
+              <template v-if="settings.layout === 'list'">
+                <ServerItem
+                  v-for="server in group.servers" :key="`${group.key}:${server.name}`"
+                  :server="server"
+                  :compact-mode="settings.compactMode"
+                  class="col-span-1"
+                />
+              </template>
+            </div>
+          </section>
+          <div v-if="serverGroups.length === 0" class="text-center text-gray-500 py-8">
+            当前视图下没有服务器
+          </div>
+        </div>
+      </Transition>
+    </main>
+  </div>
   <div class="h-16" />
 </template>
 
@@ -153,8 +204,9 @@ const { width: WindowWidth } = useWindowSize()
 const settings = useLocalStorage('sstl-settings', {
   layout: 'grid',
   compactMode: false,
+  viewMode: 'directory' as 'directory' | 'tag',
+  directoryFilter: '',
   tagFilter: '',
-  groupByTag: false,
   showMetricChart: false,
   chartMetric: 'cpu' as MetricKey,
   chartHistoryKeep: 300,
@@ -179,6 +231,24 @@ const serverCardCount = computed(() => {
   return Math.floor(WindowWidth.value / CARD_WIDTH) || 1
 })
 const selectedMetric = computed(() => metricOption(settings.value.chartMetric as MetricKey))
+const allServers = computed(() => serverData.value?.servers || [])
+const directories = computed(() => {
+  const groups = new Map<string, { key: string; label: string; count: number }>()
+  for (const server of allServers.value) {
+    const key = server.gid?.trim() || '__ungrouped__'
+    const label = key === '__ungrouped__' ? '未分组' : key
+    const group = groups.get(key) || { key, label, count: 0 }
+    group.count += 1
+    groups.set(key, group)
+  }
+  return [...groups.values()].sort((left, right) => {
+    if (left.key === '__ungrouped__')
+      return 1
+    if (right.key === '__ungrouped__')
+      return -1
+    return left.label.localeCompare(right.label)
+  })
+})
 const availableTags = computed(() => {
   const tags = new Map<string, string>()
   for (const server of serverData.value?.servers || []) {
@@ -190,25 +260,46 @@ const availableTags = computed(() => {
   }
   return [...tags.values()].sort((left, right) => left.localeCompare(right))
 })
+const tagCounts = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const server of allServers.value) {
+    for (const tag of new Set(server.tags || [])) {
+      const key = tag.trim().toLocaleLowerCase()
+      if (key)
+        counts[key] = (counts[key] || 0) + 1
+    }
+  }
+  return counts
+})
+const isBrowseAll = computed(() => settings.value.viewMode === 'directory'
+  ? !settings.value.directoryFilter
+  : !settings.value.tagFilter)
 const filteredServers = computed(() => {
+  if (settings.value.viewMode === 'directory') {
+    if (!settings.value.directoryFilter)
+      return allServers.value
+    return allServers.value.filter(server => (
+      (server.gid?.trim() || '__ungrouped__') === settings.value.directoryFilter
+    ))
+  }
   const selected = settings.value.tagFilter.toLocaleLowerCase()
   if (!selected)
-    return serverData.value?.servers || []
-  return (serverData.value?.servers || []).filter(server => (
+    return allServers.value
+  return allServers.value.filter(server => (
     server.tags || []
   ).some(tag => tag.toLocaleLowerCase() === selected))
 })
 const serverGroups = computed(() => {
-  if (!settings.value.groupByTag) {
+  if (settings.value.viewMode === 'directory') {
     return filteredServers.value.length
-      ? [{ key: 'all', label: '', servers: filteredServers.value }]
+      ? [{ key: settings.value.directoryFilter || 'all', label: '', servers: filteredServers.value }]
       : []
   }
 
-  const selected = settings.value.tagFilter
+  const selected = settings.value.tagFilter.toLocaleLowerCase()
   if (selected) {
     return filteredServers.value.length
-      ? [{ key: selected, label: selected, servers: filteredServers.value }]
+      ? [{ key: selected, label: settings.value.tagFilter, servers: filteredServers.value }]
       : []
   }
 
@@ -224,6 +315,19 @@ const serverGroups = computed(() => {
   }
   return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label))
 })
+
+function clearBrowseSelection() {
+  settings.value.directoryFilter = ''
+  settings.value.tagFilter = ''
+}
+
+function switchView(view: 'directory' | 'tag') {
+  settings.value.viewMode = view
+  if (view === 'directory')
+    settings.value.tagFilter = ''
+  else
+    settings.value.directoryFilter = ''
+}
 
 onMounted(() => {
   fetch(JSON_API)

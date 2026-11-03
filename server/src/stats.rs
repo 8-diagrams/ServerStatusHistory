@@ -165,6 +165,11 @@ impl StatsMgr {
                         stat_t.pos = info.pos;
                         stat_t.disabled = info.disabled;
                         stat_t.weight += info.weight;
+                        // Fixed hosts may also belong to a directory. The
+                        // directory is server-managed and must be exposed in
+                        // the JSON response even when the agent does not send
+                        // a group id.
+                        stat_t.gid.clone_from(&info.gid);
                         stat_t.labels = info.labels.clone();
                         stat_t.tags.clone_from(&info.tags);
 
@@ -258,11 +263,15 @@ impl StatsMgr {
                     latest_group_gc = now;
                     //
                     if let Ok(mut hm) = hosts_map.lock() {
-                        hm.retain(|_, o| o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now);
+                        hm.retain(|name, o| {
+                            cfg.hosts_map.contains_key(name) || o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now
+                        });
                     }
                     //
                     if let Ok(mut sm) = stat_map.lock() {
-                        sm.retain(|_, o| o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now);
+                        sm.retain(|name, o| {
+                            cfg.hosts_map.contains_key(name) || o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now
+                        });
                     }
                 }
 

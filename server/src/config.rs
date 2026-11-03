@@ -369,4 +369,16 @@ mod tests {
         assert!(!cfg.hosts.is_empty());
         assert_eq!(cfg.hosts[0].tags, vec!["AWS", "MYSQL"]);
     }
+
+    #[test]
+    fn fixed_hosts_accept_directory_gid() {
+        let cfg = from_str(
+            r#"
+                hosts = [{name = "mail-1", password = "secret", gid = "MAILSVR"}]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.hosts[0].gid, "MAILSVR");
+        assert_eq!(cfg.hosts_map["mail-1"].gid, "MAILSVR");
+    }
 }

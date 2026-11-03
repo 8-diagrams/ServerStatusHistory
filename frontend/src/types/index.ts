@@ -37,6 +37,8 @@ export interface ServerData {
   hdd_used: number
   labels: string
   tags?: string[]
+  /** Server-side directory/group identifier. */
+  gid?: string
   weight: number
   latest_ts: number
   si: boolean
