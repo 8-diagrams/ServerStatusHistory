@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::Host;
+use crate::config::{Host, HostGroup};
 use crate::history::HistoryService;
 use crate::notifier::{Event, Notifier};
 use crate::payload::{HostStat, StatsResp};
@@ -26,6 +26,79 @@ const OS_LIST: [&str; 10] = [
 ];
 
 static STAT_SENDER: OnceCell<SyncSender<Cow<HostStat>>> = OnceCell::new();
+
+fn configured_host_stat(host: &Host) -> HostStat {
+    HostStat {
+        name: host.name.clone(),
+        alias: host.alias.clone(),
+        host_type: host.r#type.clone(),
+        location: host.location.clone(),
+        // A configured host that has not reported since this server process
+        // started must be visible as offline, but must not trigger a false
+        // NodeDown notification during startup.
+        notify: false,
+        online4: false,
+        online6: false,
+        labels: host.labels.clone(),
+        tags: host.tags.clone(),
+        gid: host.gid.clone(),
+        weight: host.weight,
+        pos: host.pos,
+        disabled: host.disabled,
+        ..HostStat::default()
+    }
+}
+
+fn should_keep_runtime_host(
+    configured_hosts: &HashMap<String, Host>,
+    name: &str,
+    latest_ts: u64,
+    now: u64,
+    group_gc: u64,
+) -> bool {
+    configured_hosts.contains_key(name) || latest_ts.saturating_add(group_gc) >= now
+}
+
+fn should_notify_up(previous_latest_ts: u64, latest_ts: u64, notify: bool, offline_threshold: u64) -> bool {
+    notify && previous_latest_ts != 0 && previous_latest_ts.saturating_add(offline_threshold) < latest_ts
+}
+
+fn prepare_report_host(
+    configured_hosts: &HashMap<String, Host>,
+    configured_groups: &HashMap<String, HostGroup>,
+    runtime_hosts: &mut HashMap<String, Host>,
+    stat: &mut HostStat,
+) -> bool {
+    // A fixed host's identity and directory are owned by the server config.
+    // In particular, ignore gid sent by legacy/custom Agents for that host.
+    if configured_hosts.contains_key(&stat.name) {
+        return true;
+    }
+
+    if stat.gid.is_empty() {
+        // Preserve the legacy-agent behavior: once a dynamic host has been
+        // registered, subsequent reports that omit gid still update it.
+        return runtime_hosts.contains_key(&stat.name);
+    }
+    if stat.alias.is_empty() {
+        stat.alias.clone_from(&stat.name);
+    }
+
+    let previous = runtime_hosts.get(&stat.name);
+    if previous.is_some_and(|host| host.gid == stat.gid) {
+        return true;
+    }
+    let Some(group) = configured_groups.get(&stat.gid) else {
+        return false;
+    };
+    let mut instance = group.inst_host(&stat.name);
+    if let Some(previous) = previous {
+        instance.last_network_in = previous.last_network_in;
+        instance.last_network_out = previous.last_network_out;
+    }
+    runtime_hosts.insert(stat.name.clone(), instance);
+    true
+}
 
 pub struct StatsMgr {
     resp_json: Arc<Mutex<String>>,
@@ -82,13 +155,20 @@ impl StatsMgr {
     ) -> Result<()> {
         self.history = HistoryService::new(&cfg.history)?;
         if self.history.is_some() {
+            let tiers = cfg
+                .history
+                .tiers
+                .iter()
+                .map(|tier| format!("{}:{}", tier.resolution, tier.retention))
+                .collect::<Vec<_>>()
+                .join(",");
             info!(
-                "history storage enabled: backend={}, path={}, compression={}, sample_interval={}s, retention={}d",
+                "history storage enabled: backend={}, path={}, tiers=[{}], allowed_lateness={}s, maintenance_interval={}s",
                 cfg.history.backend,
                 cfg.history.path,
-                cfg.history.compression,
-                cfg.history.sample_interval,
-                cfg.history.retention_days
+                tiers,
+                cfg.history.allowed_lateness,
+                cfg.history.maintenance_interval
             );
         }
         let hosts_map_base = Arc::new(Mutex::new(cfg.hosts_map.clone()));
@@ -102,7 +182,16 @@ impl StatsMgr {
         STAT_SENDER.set(stat_tx).unwrap();
         let (notifier_tx, notifier_rx) = sync_channel(512);
 
-        let stat_map: Arc<Mutex<HashMap<String, Arc<HostStat>>>> = Arc::new(Mutex::new(HashMap::new()));
+        // Fixed hosts are part of the server configuration, not ephemeral
+        // Agent sessions. Seed them as offline so they remain visible even if
+        // the server restarts while an Agent is down or has never reported.
+        let initial_stats = cfg
+            .hosts_map
+            .iter()
+            .filter(|(_, host)| !host.disabled)
+            .map(|(name, host)| (name.clone(), Arc::new(configured_host_stat(host))))
+            .collect();
+        let stat_map: Arc<Mutex<HashMap<String, Arc<HostStat>>>> = Arc::new(Mutex::new(initial_stats));
 
         // stat_rx thread
         thread::spawn({
@@ -115,30 +204,16 @@ impl StatsMgr {
                 while let Ok(mut stat) = stat_rx.recv() {
                     trace!("recv stat `{stat:?}");
 
-                    let mut stat_t = stat.to_mut();
+                    let stat_t = stat.to_mut();
 
-                    // group mode
-                    if !stat_t.gid.is_empty() {
-                        if stat_t.alias.is_empty() {
-                            stat_t.alias = stat_t.name.clone();
+                    // Resolve fixed-vs-dynamic identity before applying the
+                    // report. This does not change the Agent wire protocol.
+                    if let Ok(mut runtime_hosts) = hosts_map.lock() {
+                        if !prepare_report_host(&cfg.hosts_map, &cfg.hosts_group_map, &mut runtime_hosts, stat_t) {
+                            continue;
                         }
-
-                        if let Ok(mut hosts_map) = hosts_map.lock() {
-                            let host = hosts_map.get(&stat_t.name);
-                            if host.is_none() || !host.unwrap().gid.eq(&stat_t.gid) {
-                                if let Some(group) = cfg.hosts_group_map.get(&stat_t.gid) {
-                                    // 名称不变，换组了，更新组配置 & last in/out
-                                    let mut inst = group.inst_host(&stat_t.name);
-                                    if let Some(o) = host {
-                                        inst.last_network_in = o.last_network_in;
-                                        inst.last_network_out = o.last_network_out;
-                                    }
-                                    hosts_map.insert(stat_t.name.clone(), inst);
-                                } else {
-                                    continue;
-                                }
-                            }
-                        }
+                    } else {
+                        continue;
                     }
 
                     //
@@ -219,7 +294,12 @@ impl StatsMgr {
                                     stat_t.ip_info = pre_stat.ip_info.clone();
                                 }
 
-                                if stat_t.notify && (pre_stat.latest_ts + cfg.offline_threshold < stat_t.latest_ts) {
+                                if should_notify_up(
+                                    pre_stat.latest_ts,
+                                    stat_t.latest_ts,
+                                    stat_t.notify,
+                                    cfg.offline_threshold,
+                                ) {
                                     notify_up = true;
                                 }
                             }
@@ -264,13 +344,13 @@ impl StatsMgr {
                     //
                     if let Ok(mut hm) = hosts_map.lock() {
                         hm.retain(|name, o| {
-                            cfg.hosts_map.contains_key(name) || o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now
+                            should_keep_runtime_host(&cfg.hosts_map, name, o.latest_ts, now, cfg.group_gc)
                         });
                     }
                     //
                     if let Ok(mut sm) = stat_map.lock() {
                         sm.retain(|name, o| {
-                            cfg.hosts_map.contains_key(name) || o.gid.is_empty() || o.latest_ts + cfg.group_gc >= now
+                            should_keep_runtime_host(&cfg.hosts_map, name, o.latest_ts, now, cfg.group_gc)
                         });
                     }
                 }
@@ -325,6 +405,9 @@ impl StatsMgr {
                             if let Some(history) = history.as_ref() {
                                 let mut offline_stat = (**stat).clone();
                                 offline_stat.latest_ts = now;
+                                // This state transition is generated by the
+                                // server, not delayed Agent event time.
+                                offline_stat.agent_ts = None;
                                 history.record(&offline_stat);
                             }
                         }
@@ -525,6 +608,15 @@ fn build_hosts_catalog(data: &StatsResp) -> serde_json::Value {
 mod host_query_tests {
     use super::*;
 
+    fn configured(name: &str, gid: &str) -> Host {
+        Host {
+            name: name.to_string(),
+            password: "secret".to_string(),
+            gid: gid.to_string(),
+            ..Host::default()
+        }
+    }
+
     fn stat(name: &str, gid: &str, tags: &[&str]) -> Arc<HostStat> {
         Arc::new(HostStat {
             name: name.to_string(),
@@ -605,5 +697,122 @@ mod host_query_tests {
         assert_eq!(catalog["directories"][0]["id"], "FINTECH");
         assert_eq!(catalog["tags"][0]["name"], "AWS");
         assert_eq!(catalog["tags"][0]["count"], 2);
+    }
+
+    #[test]
+    fn configured_hosts_are_kept_after_group_gc_even_with_gid() {
+        let configured_hosts = HashMap::from([(String::from("fixed"), configured("fixed", "FINTECH"))]);
+        assert!(should_keep_runtime_host(&configured_hosts, "fixed", 0, 10_000, 30));
+        assert!(!should_keep_runtime_host(&configured_hosts, "dynamic", 1, 10_000, 30));
+        assert!(should_keep_runtime_host(
+            &configured_hosts,
+            "dynamic",
+            9_980,
+            10_000,
+            30
+        ));
+    }
+
+    #[test]
+    fn configured_host_seed_is_offline_but_keeps_server_metadata() {
+        let host = configured("fixed", "FINTECH");
+        let stat = configured_host_stat(&host);
+        assert_eq!(stat.name, "fixed");
+        assert_eq!(stat.gid, "FINTECH");
+        assert!(!stat.online4 && !stat.online6);
+        assert!(!stat.notify);
+    }
+
+    #[test]
+    fn fixed_host_report_does_not_follow_agent_gid() {
+        let configured_hosts = HashMap::from([(String::from("fixed"), configured("fixed", "FINTECH"))]);
+        let configured_groups = HashMap::from([(
+            String::from("OTHER"),
+            HostGroup {
+                gid: "OTHER".to_string(),
+                password: "group-secret".to_string(),
+                location: String::new(),
+                r#type: String::new(),
+                notify: true,
+                pos: 0,
+                weight: 0,
+                labels: String::new(),
+                tags: Vec::new(),
+            },
+        )]);
+        let mut runtime_hosts = configured_hosts.clone();
+        let mut report = HostStat {
+            name: "fixed".to_string(),
+            gid: "OTHER".to_string(),
+            ..HostStat::default()
+        };
+
+        assert!(prepare_report_host(
+            &configured_hosts,
+            &configured_groups,
+            &mut runtime_hosts,
+            &mut report,
+        ));
+        assert_eq!(runtime_hosts["fixed"].gid, "FINTECH");
+    }
+
+    #[test]
+    fn dynamic_host_is_created_from_group_and_expires() {
+        let configured_hosts = HashMap::new();
+        let configured_groups = HashMap::from([(
+            String::from("FINTECH"),
+            HostGroup {
+                gid: "FINTECH".to_string(),
+                password: "group-secret".to_string(),
+                location: String::new(),
+                r#type: String::new(),
+                notify: true,
+                pos: 0,
+                weight: 0,
+                labels: String::new(),
+                tags: Vec::new(),
+            },
+        )]);
+        let mut runtime_hosts = HashMap::new();
+        let mut report = HostStat {
+            name: "dynamic".to_string(),
+            gid: "FINTECH".to_string(),
+            ..HostStat::default()
+        };
+
+        assert!(prepare_report_host(
+            &configured_hosts,
+            &configured_groups,
+            &mut runtime_hosts,
+            &mut report,
+        ));
+        assert_eq!(runtime_hosts["dynamic"].gid, "FINTECH");
+        assert!(!should_keep_runtime_host(&configured_hosts, "dynamic", 1, 100, 30));
+    }
+
+    #[test]
+    fn existing_dynamic_host_accepts_legacy_report_without_gid() {
+        let configured_hosts = HashMap::new();
+        let configured_groups = HashMap::new();
+        let mut runtime_hosts = HashMap::from([("dynamic".to_string(), configured("dynamic", "FINTECH"))]);
+        let mut report = HostStat {
+            name: "dynamic".to_string(),
+            gid: String::new(),
+            ..HostStat::default()
+        };
+
+        assert!(prepare_report_host(
+            &configured_hosts,
+            &configured_groups,
+            &mut runtime_hosts,
+            &mut report,
+        ));
+    }
+
+    #[test]
+    fn first_report_after_startup_is_not_a_node_up_event() {
+        assert!(!should_notify_up(0, 100, true, 30));
+        assert!(should_notify_up(50, 100, true, 30));
+        assert!(!should_notify_up(50, 100, false, 30));
     }
 }

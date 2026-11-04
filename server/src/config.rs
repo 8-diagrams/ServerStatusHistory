@@ -32,7 +32,16 @@ fn default_history_path() -> String {
     "data/history.db".to_string()
 }
 fn default_history_sample_interval() -> u64 {
-    60
+    1
+}
+fn default_history_allowed_lateness() -> u64 {
+    300
+}
+fn default_history_maintenance_interval() -> u64 {
+    30
+}
+fn default_history_max_query_points() -> usize {
+    1200
 }
 fn default_history_retention_days() -> u64 {
     30
@@ -45,6 +54,29 @@ fn default_history_delete_batch_size() -> usize {
 }
 fn default_history_compression() -> String {
     "latest".to_string()
+}
+
+fn default_history_tiers() -> Vec<HistoryTierConfig> {
+    [
+        ("1s", "15m"),
+        ("1m", "30d"),
+        ("5m", "90d"),
+        ("1h", "1y"),
+        ("1d", "3y"),
+        ("1mo", "10y"),
+    ]
+    .into_iter()
+    .map(|(resolution, retention)| HistoryTierConfig {
+        resolution: resolution.to_string(),
+        retention: retention.to_string(),
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HistoryTierConfig {
+    pub resolution: String,
+    pub retention: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -60,6 +92,18 @@ pub struct HistoryConfig {
     pub compression: String,
     #[serde(default = "default_history_sample_interval")]
     pub sample_interval: u64,
+    /// Maximum accepted delay between the agent event timestamp and server receive time.
+    #[serde(default = "default_history_allowed_lateness")]
+    pub allowed_lateness: u64,
+    #[serde(default = "default_history_maintenance_interval")]
+    pub maintenance_interval: u64,
+    #[serde(default = "default_history_max_query_points")]
+    pub max_query_points: usize,
+    // Empty when omitted from an existing configuration. The history parser
+    // then falls back to legacy single-tier fields; Default still supplies
+    // the new six-tier policy for programmatic callers.
+    #[serde(default)]
+    pub tiers: Vec<HistoryTierConfig>,
     #[serde(default = "default_history_retention_days")]
     pub retention_days: u64,
     #[serde(default = "default_history_cleanup_interval")]
@@ -80,6 +124,10 @@ impl Default for HistoryConfig {
             path: default_history_path(),
             compression: default_history_compression(),
             sample_interval: default_history_sample_interval(),
+            allowed_lateness: default_history_allowed_lateness(),
+            maintenance_interval: default_history_maintenance_interval(),
+            max_query_points: default_history_max_query_points(),
+            tiers: default_history_tiers(),
             retention_days: default_history_retention_days(),
             cleanup_interval: default_history_cleanup_interval(),
             delete_batch_size: default_history_delete_batch_size(),
@@ -335,6 +383,23 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(!cfg.history.enabled);
         assert_eq!(cfg.history.backend, "sqlite");
+    }
+
+    #[test]
+    fn legacy_history_section_does_not_implicitly_enable_new_tiers() {
+        let cfg: Config = toml::from_str(
+            r#"
+                [history]
+                enabled = true
+                sample_interval = 60
+                retention_days = 0
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.history.enabled);
+        assert!(cfg.history.tiers.is_empty());
+        assert_eq!(cfg.history.sample_interval, 60);
+        assert_eq!(cfg.history.retention_days, 0);
     }
 
     #[test]

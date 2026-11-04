@@ -494,6 +494,13 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
         return StatusCode::BAD_REQUEST;
     }
 
+    // Preserve the wire timestamp for event-time history without changing the
+    // public HostStat shape or requiring an Agent upgrade. Python agents that
+    // do not send latest_ts simply fall back to the server receive time.
+    if let Some(value) = json_data.as_mut() {
+        preserve_agent_timestamp(value);
+    }
+
     if let Some(mgr) = G_STATS_MGR.get() {
         if mgr.report(json_data.unwrap()).is_err() {
             return StatusCode::BAD_REQUEST;
@@ -503,9 +510,32 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
     StatusCode::OK
 }
 
+pub(crate) fn preserve_agent_timestamp(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        // `_agent_ts` is server-internal. Never trust a value supplied by an
+        // Agent, including older/custom JSON clients.
+        object.remove("_agent_ts");
+        if let Some(ts) = object.get("latest_ts").and_then(Value::as_u64) {
+            object.insert("_agent_ts".to_string(), json!(ts));
+        }
+    }
+}
+
 #[cfg(test)]
 mod host_query_tests {
-    use super::parse_hosts_query;
+    use super::{parse_hosts_query, preserve_agent_timestamp};
+    use serde_json::json;
+
+    #[test]
+    fn agent_event_time_is_copied_from_legacy_timestamp_only() {
+        let mut report = json!({"latest_ts": 123, "_agent_ts": 999});
+        preserve_agent_timestamp(&mut report);
+        assert_eq!(report["_agent_ts"], 123);
+
+        let mut old_python_report = json!({"name": "legacy", "_agent_ts": 999});
+        preserve_agent_timestamp(&mut old_python_report);
+        assert!(old_python_report.get("_agent_ts").is_none());
+    }
 
     #[test]
     fn repeated_tag_parameters_are_preserved() {

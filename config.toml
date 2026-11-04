@@ -70,13 +70,42 @@ notify_interval = 30
 enabled = true
 backend = "sqlite"
 path = "data/history.db"
-# latest: 每个时间桶保留最新样本；none: 保存每条上报（数据量较大）
+# 兼容旧配置字段；分层聚合的具体精度由下面的 tiers 定义
 compression = "latest"
-sample_interval = 60
+# 兼容旧配置的字段；启用 tiers 后，最高精度由第一个 tier 决定。
+sample_interval = 1
 retention_days = 30
 cleanup_interval = 3600
 delete_batch_size = 1000
 vacuum_after_cleanup = false
+allowed_lateness = 300
+maintenance_interval = 30
+max_query_points = 1200
+
+# 多精度历史：最近 15 分钟保留秒级点，低精度数据由上一层自动压缩生成。
+[[history.tiers]]
+resolution = "1s"
+retention = "15m"
+
+[[history.tiers]]
+resolution = "1m"
+retention = "30d"
+
+[[history.tiers]]
+resolution = "5m"
+retention = "90d"
+
+[[history.tiers]]
+resolution = "1h"
+retention = "1y"
+
+[[history.tiers]]
+resolution = "1d"
+retention = "3y"
+
+[[history.tiers]]
+resolution = "1mo"
+retention = "10y"
 
 # https://core.telegram.org/bots/api
 # https://jinja.palletsprojects.com/en/3.0.x/templates/#if

@@ -23,6 +23,8 @@ impl ServerStatus for ServerStatusSrv {
         if let Some(mgr) = G_STATS_MGR.get() {
             match serde_json::to_value(request.get_ref()) {
                 Ok(v) => {
+                    let mut v = v;
+                    crate::http::preserve_agent_timestamp(&mut v);
                     let _ = mgr.report(v);
                 }
                 Err(err) => {

@@ -345,21 +345,66 @@ docker-compose up -d
 enabled = true
 backend = "sqlite"
 path = "data/history.db"
-compression = "latest"       # latest: 每个时间桶保留最新点；none: 保存每条上报
-sample_interval = 60          # latest 模式的时间桶（秒）
-retention_days = 30           # 0 表示不自动删除
-cleanup_interval = 3600       # 自动清理检查间隔（秒）
-delete_batch_size = 1000      # 分批删除，避免长事务阻塞查询
-vacuum_after_cleanup = false  # 是否在清理后回收 SQLite 空间
+# 兼容旧配置的字段；分层聚合由 tiers 决定
+# 兼容旧配置字段；分层聚合由 tiers 决定
+compression = "latest"
+sample_interval = 1
+allowed_lateness = 300        # Agent 事件时间最多允许迟到 5 分钟
+maintenance_interval = 30     # 聚合和自动清理检查间隔（秒）
+max_query_points = 1200       # 单次 API 返回点数上限
+delete_batch_size = 1000      # 每次维护最多删除的记录数（exhaustive CLI 除外）
+vacuum_after_cleanup = false  # 清理后是否执行 VACUUM，默认关闭
+
+[[history.tiers]]
+resolution = "1s"
+retention = "15m"
+[[history.tiers]]
+resolution = "1m"
+retention = "30d"
+[[history.tiers]]
+resolution = "5m"
+retention = "90d"
+[[history.tiers]]
+resolution = "1h"
+retention = "1y"
+[[history.tiers]]
+resolution = "1d"
+retention = "3y"
+[[history.tiers]]
+resolution = "1mo"
+retention = "10y"
 ```
+
+默认精度分层为：最近 15 分钟 1 秒、15 分钟至 30 天 1 分钟、30 至 90 天 5 分钟、90 天至 1 年 1 小时、1 至 3 年 1 天、3 至 10 年自然月。低精度层由上一层自动聚合；超过最长层保留期的数据自动删除。Gauge/状态指标使用加权平均，容量类字段使用最后值，`network_in/out` 使用累计计数器的正向差值，回退记为 reset 而不产生负流量。缺失样本保留 gap 统计，不伪造数据。
+
+`compression = "latest"` 会在最高精度层的每个时间桶保留最新写入样本；`none` 保留每个收到的秒级样本（同一主机同一秒仍以最后一次写入为准）。默认最高层是 1 秒，因此不会降低 Agent 原有的秒级采样精度。
+
+维护线程与上报写入线程分离。迟到或乱序样本会标记受影响时间桶并重新聚合；默认允许 Agent 事件时间迟到 300 秒，超出范围或明显来自未来的时间戳改用 Server 接收时间。旧 Agent 不需要升级；没有可用事件时间的 Python Agent 自动使用接收时间。
 
 历史查询接口为：
 
 ```text
-GET /api/history?host=h1&from=<unix>&to=<unix>&step=60&metrics=cpu,load_1,traffic_in,traffic_out
+GET /api/history?host=h1&from=<unix>&to=<unix>&resolution=auto&max_points=1200&metrics=cpu,load_1,traffic_in,traffic_out
 ```
 
-`network_in/out` 是累计计数器；`traffic_in/out` 是服务端按相邻历史点计算出的区间流量，遇到客户端重启或计数器回退时不会产生负值。
+`resolution=auto` 会根据请求时间段可用的保留层选择最高可用精度；也可以显式传 `1s`、`1m`、`5m`、`1h`、`1d` 或 `1mo`。`step` 仍然兼容，用于在选定层之上进一步合并响应点。单次查询最多 10 年，超过 `max_query_points` 会自动提高响应步长。返回中包含 `resolution` 和 `step`。
+
+历史管理命令（删除操作必须显式传 `--apply`）：
+
+```bash
+./stat_server --config config.toml history status
+./stat_server --config config.toml history compact --apply
+./stat_server --config config.toml history enforce-retention --apply
+./stat_server --config config.toml history verify
+./stat_server --config config.toml history prune --before 2020-01-01
+./stat_server --config config.toml history prune --before 2020-01-01 --tier 1d --apply
+./stat_server --config config.toml history vacuum --apply
+```
+
+`prune` 默认只预览候选数量；`--tier raw` 或 `--tier 1s` 只处理原始秒级表，指定其它 tier 只处理该聚合层，不会误删其它层。`vacuum` 应在 Server 停止后执行。
+`history status` 同时显示各层记录数、时间范围、待聚合桶数量，以及 SQLite 主文件/WAL/SHM 的占用字节数。
+
+六层全部填满约为每台主机 80,000 条记录。当前 SQLite rollup 保存完整指标统计 JSON，保守容量规划可按约 200～350 MiB/持续上报主机估算（20 台约 4～7 GiB），实际值请以 `history status` 为准；WAL 在维护期间还会有临时峰值。
 
 Web 客户端的数据读取策略应当是“实时轮询 + 本地积累 + 缺失补拉”：
 

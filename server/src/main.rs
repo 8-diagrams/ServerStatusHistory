@@ -6,7 +6,7 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate prettytable;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use once_cell::sync::OnceCell;
 use std::process;
 use std::sync::Arc;
@@ -51,6 +51,14 @@ struct Args {
     notify_test: bool,
     #[arg(long = "cloud", help = "cloud mode, load cfg from env var: SRV_CONF")]
     cloud: bool,
+    #[command(subcommand)]
+    command: Option<ServerCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServerCommand {
+    /// Inspect, compact, or delete historical metric data.
+    History(history::HistoryCli),
 }
 
 fn create_app_router() -> Router {
@@ -136,6 +144,11 @@ async fn main() -> Result<(), anyhow::Error> {
     } else {
         error!("can't parse config");
         process::exit(1);
+    }
+
+    if let Some(ServerCommand::History(command)) = &args.command {
+        history::run_history_cli(&G_CONFIG.get().unwrap().history, command)?;
+        return Ok(());
     }
 
     // init tpl

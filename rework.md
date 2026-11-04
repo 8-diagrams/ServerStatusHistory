@@ -62,18 +62,43 @@ enabled = true
 backend = "sqlite"
 path = "data/history.db"
 compression = "latest"
-sample_interval = 60
-retention_days = 30
-cleanup_interval = 3600
+sample_interval = 1
+allowed_lateness = 300
+maintenance_interval = 30
+max_query_points = 1200
 delete_batch_size = 1000
 vacuum_after_cleanup = false
+
+[[history.tiers]]
+resolution = "1s"
+retention = "15m"
+[[history.tiers]]
+resolution = "1m"
+retention = "30d"
+[[history.tiers]]
+resolution = "5m"
+retention = "90d"
+[[history.tiers]]
+resolution = "1h"
+retention = "1y"
+[[history.tiers]]
+resolution = "1d"
+retention = "3y"
+[[history.tiers]]
+resolution = "1mo"
+retention = "10y"
 ```
 
-- `latest`：把时间戳落到 `sample_interval` 时间桶，同一主机、分组和时间桶保留最后一条数据。
-- `none`：按 Agent 上报时间保存；由于主键使用秒级时间戳，同一秒内仍只保留最后一条。
-- `retention_days = 0`：关闭自动删除。
-- 自动清理按 `delete_batch_size` 分批删除，减少长事务影响。
+- `compression`、`sample_interval`、`retention_days` 和 `cleanup_interval` 为旧配置兼容字段；配置了 `tiers` 后以分层定义为准。没有 `tiers` 的旧配置仍按旧的单层策略工作，`retention_days = 0` 表示不自动删除。
+- `compression = "latest"` 按第一层 resolution 对事件时间分桶并以 UPSERT 保留桶内最后写入样本；`none` 保留收到的每个秒级样本（同秒主键仍会覆盖）。默认第一层是 1 秒。
+- 实际保存层级依次为 1 秒/15 分钟、1 分钟/30 天、5 分钟/90 天、1 小时/1 年、1 天/3 年、自然月/10 年。
+- `metric_samples` 保存最热的秒级数据；`metric_rollups` 保存其余聚合层。`history_dirty` 记录需要重新计算的时间桶，`history_watermarks` 记录维护进度。
+- 写入线程只负责接收 Agent 数据；独立维护线程每 `maintenance_interval` 秒压缩并清理，避免维护任务阻塞上报。
+- 删除某层记录前会确认下一层对应聚合桶已经存在；低精度结果未生成时不会先删除源数据。
+- 自动清理按 `delete_batch_size` 分批执行，减少长事务影响。
 - `vacuum_after_cleanup` 会主动回收文件空间，但会带来额外 I/O 和锁等待，默认关闭。
+- Gauge 指标按样本数加权平均，容量/累计值保存最后值，`traffic_in/out` 累加正向计数器差值。计数器回退记为 reset，缺失上报记为 gap，不插值、不产生负流量。
+- Agent 时间戳在未来不超过 30 秒且迟到不超过 `allowed_lateness` 时作为事件时间；否则使用 Server 接收时间。迟到和同秒重复数据使用 UPSERT，并重新计算受影响的所有下游时间桶。
 
 默认相对路径 `data/history.db` 以 Server 工作目录为基准。systemd 默认工作目录为 `/opt/ServerStatus`，因此实际文件为 `/opt/ServerStatus/data/history.db`；Docker 中为 `/data/history.db`。
 
@@ -82,17 +107,36 @@ vacuum_after_cleanup = false
 新增接口：
 
 ```text
-GET /api/history?host=h1&from=<unix>&to=<unix>&step=60&metrics=cpu,load_1,traffic_in,traffic_out
+GET /api/history?host=h1&from=<unix>&to=<unix>&resolution=auto&max_points=1200&metrics=cpu,load_1,traffic_in,traffic_out
 ```
 
 行为：
 
 - `from`、`to` 使用 Unix 秒。
-- `step` 控制响应时间桶。
+- `resolution=auto` 根据请求起点的数据年龄选择仍在保留期内的最高精度；也可指定 `1s/1m/5m/1h/1d/1mo`。
+- `step` 在已选源层之上控制响应时间桶，不能把低精度数据恢复为高精度。
+- `max_points` 控制单次返回点数，不能超过服务端 `max_query_points`。
 - `metrics` 是逗号分隔的白名单指标。
-- 单次查询最长 31 天，SQL 最多读取 100000 条。
-- 累计流量在时间桶内求差值累计；其他指标当前使用桶内最后值。
+- 单次查询最长 10 年；响应返回实际使用的 `resolution` 和 `step`。
+- 累计流量在时间桶内求正向差值之和；Gauge 使用平均值，总量字段使用最后值。
 - 接口目前与公开的 `/json/stats.json` 一样未增加鉴权。
+
+历史管理 CLI：
+
+```bash
+./stat_server --config config.toml history status
+./stat_server --config config.toml history compact --apply
+./stat_server --config config.toml history enforce-retention --apply
+./stat_server --config config.toml history verify
+./stat_server --config config.toml history prune --before 2020-01-01
+./stat_server --config config.toml history prune --before 2020-01-01 --host h1 --tier 1d --apply
+./stat_server --config config.toml history vacuum --apply
+```
+
+`compact`、`enforce-retention`、`prune` 和 `vacuum` 默认 dry-run；会改变数据的操作必须传 `--apply`。`prune --tier raw`/`1s` 只删除原始层，指定聚合 tier 只删除该层，不传 `--tier` 才处理全部层。建议停服后执行 `vacuum`。
+`history status` 会报告各层记录数和时间范围、dirty bucket 数，以及 SQLite 主文件、WAL、SHM 和总占用字节数；`history verify` 还会执行 SQLite `quick_check`，检查过期残留和已不在配置中的旧 tier。
+
+按各层完整保留窗口估算，每台主机最多约 900 + 43,200 + 25,920 + 8,760 + 1,095 + 120，即约 80,000 条记录。当前 rollup 使用包含全部指标统计量的 JSON，持续上报且各层填满后，保守估计约 200～350 MiB/主机；20 台主机约 4～7 GiB。SQLite 实际空间还取决于主机名长度、数值长度、页利用率和 WAL 峰值，应以 `history status` 的实际字节数为准。后续若规模较大，优先实现紧凑二进制/压缩编码或切换 VictoriaMetrics、InfluxDB 插件。
 
 ## 3. Web 前端改造
 
@@ -218,13 +262,15 @@ npm run build
 git diff --check
 ```
 
-服务端共有 5 项相关单元测试通过，包括：
+服务端当前共有 32 项单元测试通过，包括：
 
 - 旧配置不会隐式开启历史存储。
 - 标签规范化、去重和 HostGroup 继承。
 - 完整示例 TOML 层级正确。
-- SQLite 分批清理。
-- 累计计数器回退、查询起点基线和响应分桶。
+- SQLite 分批清理、分层自动压缩和原始层安全删除。
+- 秒级到分钟/小时/天/月的分层查询、自动精度选择和步长对齐。
+- 累计计数器回退、乱序/迟到重复数据、事件时间边界和响应分桶。
+- SQLite 完整性、过期记录、未知 tier 和待处理 dirty bucket 验证。
 
 另外完成了真实链路验证：
 
@@ -480,7 +526,7 @@ python3 stat_client.py \
 5. 增加前端自动化测试，覆盖 IndexedDB 缺口计算、淘汰策略、刷新恢复、标签分组和多标签重复显示。
 6. 增加 SQLite migration 框架、数据库损坏恢复说明、运行指标和写队列丢样计数。
 7. 更新 Dockerfile 的 Rust 版本，并把前端构建正式纳入 Docker/CI 流程，避免依赖仓库中预生成的 `web/`。
-8. 评估历史查询桶内 Gauge 使用最后值还是平均值；当前 API 实际使用最后值，指标目录中保留了未来聚合语义。
+8. 评估是否为历史 API 增加显式聚合函数选择；当前分层 rollup 对 Gauge 使用平均值、容量字段使用最后值，`step` 只负责进一步合并已选层。
 9. 对 IndexedDB 进行大量主机、30 天数据压力测试；当前 512 MiB 是应用层保守估算。
 
 ## 10. 重要文件索引

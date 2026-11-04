@@ -93,6 +93,10 @@ pub struct HostStat {
     // user data
     #[serde(skip_deserializing)]
     pub latest_ts: u64,
+    /// Timestamp supplied by an agent, retained internally for event-time history.
+    /// It is never exposed in the legacy JSON response.
+    #[serde(rename = "_agent_ts", default, skip_serializing)]
+    pub agent_ts: Option<u64>,
 
     #[serde(skip_serializing, skip_deserializing)]
     pub pos: usize,
