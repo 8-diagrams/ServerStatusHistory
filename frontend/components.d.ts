@@ -8,6 +8,8 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     Bandage: typeof import('./src/components/Bandage.vue')['default']
+    CarrierMetrics: typeof import('./src/components/CarrierMetrics.vue')['default']
+    DropdownSelect: typeof import('./src/components/DropdownSelect.vue')['default']
     IconCPU: typeof import('./src/components/icon/IconCPU.vue')['default']
     IconDisk: typeof import('./src/components/icon/IconDisk.vue')['default']
     IconDownload: typeof import('./src/components/icon/IconDownload.vue')['default']

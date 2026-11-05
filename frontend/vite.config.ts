@@ -8,6 +8,9 @@ import AutoImport from 'unplugin-auto-import/vite'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd())
+  // Use the deployed demo server for local UI previews when no local API is
+  // configured. VITE_DEV_API still takes precedence for local development.
+  const devApi = env.VITE_DEV_API || 'https://st.9888812.xyz'
   const workspaceRoot = path.resolve(__dirname, '..')
   return {
     resolve: {
@@ -37,9 +40,9 @@ export default defineConfig(({ mode }) => {
     ],
     server: {
       proxy: {
-        '/json': env.VITE_DEV_API,
-        '/api/hosts': env.VITE_DEV_API,
-        '/api/history': env.VITE_DEV_API,
+        '/json': devApi,
+        '/api/hosts': devApi,
+        '/api/history': devApi,
       },
     },
   }

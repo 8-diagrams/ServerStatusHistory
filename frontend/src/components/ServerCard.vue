@@ -70,16 +70,16 @@
         {{ t('noData') }}
       </Bandage>
       <Bandage v-if="server.load !== undefined">
-        {{ server.load }}
+        {{ formatLoad(server.load) }}
       </Bandage>
       <Bandage v-if="server.load_1 !== undefined">
-        {{ server.load_1 }}
+        {{ formatLoad(server.load_1) }}
       </Bandage>
       <Bandage v-if="server.load_5 !== undefined">
-        {{ server.load_5 }}
+        {{ formatLoad(server.load_5) }}
       </Bandage>
       <Bandage v-if="server.load_15 !== undefined">
-        {{ server.load_15 }}
+        {{ formatLoad(server.load_15) }}
       </Bandage>
     </div>
     <div v-if="server.cpu !== undefined" class="flex items-center gap-2">
@@ -151,16 +151,17 @@
         {{ t('thread') }} {{ server.thread_count }}
       </Bandage>
     </div>
+    <CarrierMetrics v-if="!compactMode" :server="server" class="mt-1" />
     <div v-if="showMetricChart" class="mt-3 border-t border-[#f0edf5] pt-2">
+      <div class="mb-1 text-left text-xs font-semibold text-[#4b445a]" :title="chartLabel">
+        {{ chartLabel }}
+      </div>
       <StatusChart
         :data="chartHistory"
         :unit="chartUnit"
         :decimals="chartDecimals"
         :max="chartMax"
       />
-      <div class="mt-1 break-words text-center text-xs text-gray-500" :title="chartLabel">
-        {{ chartLabel }}
-      </div>
     </div>
   </div>
 </template>
@@ -169,7 +170,7 @@
 import type { ChartPoint } from '@/history'
 import type { ServerData } from '@/types'
 import { formatUptime, useI18n } from '@/i18n'
-import { formatBytes, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
+import { formatBytes, formatLoad, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
 
 const props = defineProps<{
   server: ServerData

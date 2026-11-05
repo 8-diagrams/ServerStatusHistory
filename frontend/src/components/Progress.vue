@@ -1,16 +1,16 @@
 <template>
   <div
-    class="inline-block text-sm bg-gray-200 rounded-full overflow-hidden relative"
+    class="relative inline-block overflow-hidden rounded-full bg-[#eeeaf7] text-sm text-[#3f3850] shadow-[inset_0_1px_2px_rgba(91,53,200,0.10)]"
   >
     <div
-      class="px-2 text-sm transition-[width] duration-500 whitespace-nowrap"
+      class="whitespace-nowrap px-2 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.28)] transition-[width,background-color] duration-500"
       :class="{
-        'bg-gray-400/50': value / max < 0.8,
-        'bg-orange-300': value / max >= 0.8 && value / max < 0.9,
-        'bg-red-300': value / max >= 0.9,
+        'bg-[#b8a9ed]': ratio < 0.8,
+        'bg-[#d7a0d8]': ratio >= 0.8 && ratio < 0.9,
+        'bg-[#e893a4]': ratio >= 0.9,
       }"
       :style="{
-        width: `${value / max * 100}%`,
+        width: `${ratio * 100}%`,
       }"
     >
       <slot />
@@ -19,8 +19,10 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{
+const props = defineProps<{
   value: number
   max: number
 }>()
+
+const ratio = computed(() => props.max > 0 ? Math.min(1, Math.max(0, props.value / props.max)) : 0)
 </script>

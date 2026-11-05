@@ -10,6 +10,10 @@ export function formatBytes(bytes: number, decimals = 2) {
   return `${Number.parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`
 }
 
+export function formatLoad(value: number) {
+  return Number.isFinite(value) ? value.toFixed(2) : '0.00'
+}
+
 export function formatTime(seconds: number, locale?: string) {
   return new Intl.DateTimeFormat(locale, {
     year: 'numeric',

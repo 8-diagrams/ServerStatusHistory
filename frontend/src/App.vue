@@ -15,13 +15,20 @@
           </div>
         </div>
         <div class="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-sm">
-          <label class="flex items-center gap-2 font-medium text-gray-600">
-            <span>{{ t('language') }}</span><select v-model="locale" class="rounded-lg border border-[#ded9ec] bg-white px-2 py-1.5 outline-none">
-              <option v-for="option in languageOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
+          <DropdownSelect
+            v-model="locale"
+            :options="languageOptions"
+            :label="t('language')"
+            variant="ghost"
+            class="w-auto min-w-[92px]"
+          >
+            <template #prefix>
+              <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4 text-[#7455e9]" aria-hidden="true">
+                <circle cx="10" cy="10" r="7.25" stroke="currentColor" stroke-width="1.5" />
+                <path d="M2.9 10h14.2M10 2.75c2 2.05 3 4.47 3 7.25s-1 5.2-3 7.25c-2-2.05-3-4.47-3-7.25s1-5.2 3-7.25Z" stroke="currentColor" stroke-width="1.35" />
+              </svg>
+            </template>
+          </DropdownSelect>
           <div class="flex items-center gap-2">
             <span class="font-medium text-gray-600">{{ t('layoutMode') }}</span><div class="flex overflow-hidden rounded-lg border border-[#ded9ec] bg-white p-0.5">
               <button v-for="mode in layoutModes" :key="mode.value" class="rounded-md p-1.5 transition-colors" :class="settings.layout === mode.value ? 'bg-[#7455e9] text-white' : 'text-gray-400 hover:bg-[#f1edff] hover:text-[#6748d8]'" :title="t(mode.labelKey)" @click="settings.layout = mode.value">
@@ -31,26 +38,22 @@
           </div>
           <label class="flex items-center gap-2 font-medium text-gray-600">{{ t('compact') }}<Switch v-model="settings.compactMode" /></label>
           <label class="flex items-center gap-2 font-medium text-gray-600">{{ t('trendChart') }}<Switch v-model="settings.showMetricChart" /></label>
-          <select v-if="settings.showMetricChart" v-model="settings.chartMetric" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" :aria-label="t('trendMetric')">
-            <option v-for="option in METRIC_OPTIONS" :key="option.key" :value="option.key">
-              {{ t(option.labelKey) }}
-            </option>
-          </select>
-          <select v-if="settings.showMetricChart" v-model="settings.chartHistoryKeep" class="rounded-lg border border-[#ded9ec] bg-white px-3 py-2 outline-none" :aria-label="t('trendRange')">
-            <option value="300">
-              {{ t('range5Minutes') }}
-            </option><option value="3600">
-              {{ t('range1Hour') }}
-            </option><option value="21600">
-              {{ t('range6Hours') }}
-            </option><option value="86400">
-              {{ t('range24Hours') }}
-            </option><option value="604800">
-              {{ t('range7Days') }}
-            </option><option value="2592000">
-              {{ t('range30Days') }}
-            </option>
-          </select>
+          <DropdownSelect
+            v-if="settings.showMetricChart"
+            :model-value="settings.chartMetric"
+            :options="metricMenuOptions"
+            :label="t('trendMetric')"
+            class="w-[156px]"
+            @update:model-value="settings.chartMetric = $event as MetricKey"
+          />
+          <DropdownSelect
+            v-if="settings.showMetricChart"
+            :model-value="String(settings.chartHistoryKeep)"
+            :options="rangeMenuOptions"
+            :label="t('trendRange')"
+            class="w-[116px]"
+            @update:model-value="settings.chartHistoryKeep = Number($event)"
+          />
         </div>
       </div>
     </header>
@@ -111,7 +114,7 @@
                 </h3><span class="rounded-full bg-[#f1edff] px-2 py-0.5 text-xs font-medium text-[#6544d5]">{{ group.servers.length }}</span>
               </div><div :class="{ 'grid gap-4': settings.layout === 'grid', 'flex flex-wrap gap-4': settings.layout === 'flex', 'flex flex-col gap-3': settings.layout === 'list' }" :style="settings.layout === 'grid' ? { gridTemplateColumns: `repeat(${serverCardCount}, minmax(0, 1fr))` } : undefined">
                 <template v-if="settings.layout === 'grid' || settings.layout === 'flex'">
-                  <ServerCard v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" :show-metric-chart="settings.showMetricChart" :chart-history="metricHistories[server.name] || []" :chart-label="t(selectedMetric.labelKey)" :chart-unit="selectedMetric.unit" :chart-decimals="selectedMetric.decimals" :chart-max="selectedMetric.max" :class="settings.layout === 'flex' ? 'min-w-[300px] flex-1' : ''" />
+                  <ServerCard v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" :show-metric-chart="settings.showMetricChart" :chart-history="metricHistories[server.name] || []" :chart-label="chartTitle" :chart-unit="selectedMetric.unit" :chart-decimals="selectedMetric.decimals" :chart-max="selectedMetric.max" :class="settings.layout === 'flex' ? 'min-w-[300px] flex-1' : ''" />
                 </template><template v-else>
                   <ServerItem v-for="server in group.servers" :key="`${group.key}:${server.name}`" :server="server" :compact-mode="settings.compactMode" />
                 </template>
@@ -148,6 +151,23 @@ const MIN_FETCH_INTERVAL = 500
 const HISTORY_RETRY_INTERVAL = 5 * 60 * 1000
 const { width: windowWidth } = useWindowSize()
 const { languageOptions, locale, t } = useI18n()
+const metricMenuOptions = computed(() => METRIC_OPTIONS.map(option => ({
+  value: option.key,
+  label: t(option.labelKey),
+})))
+const rangeMenuOptions = computed(() => [
+  { value: '300', label: t('range5Minutes') },
+  { value: '900', label: t('range15Minutes') },
+  { value: '3600', label: t('range1Hour') },
+  { value: '21600', label: t('range6Hours') },
+  { value: '86400', label: t('range24Hours') },
+  { value: '604800', label: t('range7Days') },
+  { value: '2592000', label: t('range30Days') },
+  { value: '31536000', label: t('range1Year') },
+  { value: '94608000', label: t('range3Years') },
+  { value: '157680000', label: t('range5Years') },
+  { value: '315360000', label: t('range10Years') },
+])
 const layoutModes = [
   { value: 'grid' as const, labelKey: 'layoutGrid' as const },
   { value: 'flex' as const, labelKey: 'layoutAdaptive' as const },
@@ -169,6 +189,8 @@ const historyRequests = new Map<string, number>()
 let requestVersion = 0
 const serverCardCount = computed(() => Math.max(1, Math.floor((windowWidth.value - 300) / CARD_WIDTH)))
 const selectedMetric = computed(() => metricOption(settings.value.chartMetric as MetricKey))
+const selectedRangeLabel = computed(() => rangeMenuOptions.value.find(option => option.value === String(settings.value.chartHistoryKeep))?.label || '')
+const chartTitle = computed(() => `${t(selectedMetric.value.labelKey)} (${selectedRangeLabel.value})`)
 const allDirectory = computed<CatalogDirectory>(() => ({
   id: 'all',
   name: t('allHosts'),

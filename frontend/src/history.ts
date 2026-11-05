@@ -314,11 +314,19 @@ function restoreSnapshots(host: string, snapshots: StoredSnapshot[]) {
 }
 
 function responseStep(rangeSeconds: number) {
-  if (rangeSeconds <= 24 * 60 * 60)
-    return 60
-  if (rangeSeconds <= 7 * 24 * 60 * 60)
-    return 5 * 60
-  return 30 * 60
+  const minimumResolution = rangeSeconds <= 15 * 60
+    ? 1
+    : rangeSeconds <= 30 * 24 * 60 * 60
+      ? 60
+      : rangeSeconds <= 90 * 24 * 60 * 60
+        ? 5 * 60
+        : rangeSeconds <= 365 * 24 * 60 * 60
+          ? 60 * 60
+          : rangeSeconds <= 3 * 365 * 24 * 60 * 60
+            ? 24 * 60 * 60
+            : 30 * 24 * 60 * 60
+  const targetStep = Math.ceil(rangeSeconds / MAX_CHART_POINTS)
+  return Math.max(minimumResolution, Math.ceil(targetStep / minimumResolution) * minimumResolution)
 }
 
 function missingRanges(timestamps: number[], from: number, to: number, step: number) {

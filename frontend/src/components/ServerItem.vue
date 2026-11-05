@@ -57,16 +57,16 @@
           {{ t('noLoadData') }}
         </Bandage>
         <Bandage v-if="server.load !== undefined">
-          {{ server.load }}
+          {{ formatLoad(server.load) }}
         </Bandage>
         <Bandage v-if="server.load_1 !== undefined">
-          {{ server.load_1 }}
+          {{ formatLoad(server.load_1) }}
         </Bandage>
         <Bandage v-if="server.load_5 !== undefined">
-          {{ server.load_5 }}
+          {{ formatLoad(server.load_5) }}
         </Bandage>
         <Bandage v-if="server.load_15 !== undefined">
-          {{ server.load_15 }}
+          {{ formatLoad(server.load_15) }}
         </Bandage>
       </template>
     </div>
@@ -120,6 +120,7 @@
       <Bandage v-if="server.swap_total !== undefined">
         SWAP {{ formatBytes(server.swap_used * 1024) }} / {{ formatBytes(server.swap_total * 1024) }}
       </Bandage>
+      <CarrierMetrics :server="server" />
     </div>
   </div>
 </template>
@@ -127,7 +128,7 @@
 <script setup lang="ts">
 import type { ServerData } from '@/types'
 import { formatUptime, useI18n } from '@/i18n'
-import { formatBytes, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
+import { formatBytes, formatLoad, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
 
 const props = defineProps<{
   server: ServerData
