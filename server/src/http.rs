@@ -40,23 +40,38 @@ pub async fn get_hosts_catalog() -> Json<Value> {
 /// Repeated `tag` parameters use OR semantics and are combined with the
 /// directory constraint using AND semantics.
 pub async fn get_hosts(RawQuery(raw_query): RawQuery) -> Response {
-    let (directory, tags) = parse_hosts_query(raw_query.as_deref());
-    Json(G_STATS_MGR.get().unwrap().get_hosts(directory.as_deref(), &tags)).into_response()
+    let query = parse_hosts_query(raw_query.as_deref());
+    let manager = G_STATS_MGR.get().unwrap();
+    let value = if let Some(host) = query.host.as_deref() {
+        manager.get_host(host, query.gid.as_deref())
+    } else {
+        manager.get_hosts(query.directory.as_deref(), &query.tags)
+    };
+    Json(value).into_response()
 }
 
-fn parse_hosts_query(raw_query: Option<&str>) -> (Option<String>, Vec<String>) {
-    let mut directory = None;
-    let mut tags = Vec::new();
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HostsQuery {
+    directory: Option<String>,
+    tags: Vec<String>,
+    host: Option<String>,
+    gid: Option<String>,
+}
+
+fn parse_hosts_query(raw_query: Option<&str>) -> HostsQuery {
+    let mut query = HostsQuery::default();
     if let Some(raw_query) = raw_query {
         for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
             match key.as_ref() {
-                "directory" => directory = Some(value.into_owned()),
-                "tag" => tags.push(value.into_owned()),
+                "directory" => query.directory = Some(value.into_owned()),
+                "tag" => query.tags.push(value.into_owned()),
+                "host" => query.host = Some(value.into_owned()),
+                "gid" => query.gid = Some(value.into_owned()),
                 _ => {}
             }
         }
     }
-    (directory, tags)
+    query
 }
 
 #[allow(unused)]
@@ -539,15 +554,24 @@ mod host_query_tests {
 
     #[test]
     fn repeated_tag_parameters_are_preserved() {
-        let (directory, tags) = parse_hosts_query(Some("tag=AWS&tag=MYSQL&tag=FINTECH"));
-        assert!(directory.is_none());
-        assert_eq!(tags, vec!["AWS", "MYSQL", "FINTECH"]);
+        let query = parse_hosts_query(Some("tag=AWS&tag=MYSQL&tag=FINTECH"));
+        assert!(query.directory.is_none());
+        assert_eq!(query.tags, vec!["AWS", "MYSQL", "FINTECH"]);
     }
 
     #[test]
     fn directory_and_repeated_tags_are_parsed_together() {
-        let (directory, tags) = parse_hosts_query(Some("directory=default&tag=AWS&tag=MYSQL"));
-        assert_eq!(directory.as_deref(), Some("default"));
-        assert_eq!(tags, vec!["AWS", "MYSQL"]);
+        let query = parse_hosts_query(Some("directory=default&tag=AWS&tag=MYSQL"));
+        assert_eq!(query.directory.as_deref(), Some("default"));
+        assert_eq!(query.tags, vec!["AWS", "MYSQL"]);
+    }
+
+    #[test]
+    fn host_and_gid_are_parsed_without_changing_legacy_filters() {
+        let query = parse_hosts_query(Some("host=mail%201&gid=FINTECH&directory=all&tag=AWS"));
+        assert_eq!(query.host.as_deref(), Some("mail 1"));
+        assert_eq!(query.gid.as_deref(), Some("FINTECH"));
+        assert_eq!(query.directory.as_deref(), Some("all"));
+        assert_eq!(query.tags, vec!["AWS"]);
     }
 }

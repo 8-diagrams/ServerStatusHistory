@@ -153,8 +153,12 @@
     </div>
     <CarrierMetrics v-if="!compactMode" :server="server" class="mt-1" />
     <div v-if="showMetricChart" class="mt-3 border-t border-[#f0edf5] pt-2">
-      <div class="mb-1 text-left text-xs font-semibold text-[#4b445a]" :title="chartLabel">
-        {{ chartLabel }}
+      <div class="mb-1 flex items-center justify-between gap-3 text-xs font-semibold" :title="chartLabel">
+        <span class="min-w-0 truncate text-[#4b445a]">{{ chartLabel }}</span>
+        <a
+          class="shrink-0 font-medium text-[#7455e9] hover:text-[#5b35c8]"
+          :href="detailHref"
+        >{{ t('viewServerDetails') }} →</a>
       </div>
       <StatusChart
         :data="chartHistory"
@@ -171,6 +175,7 @@ import type { ChartPoint } from '@/history'
 import type { ServerData } from '@/types'
 import { formatUptime, useI18n } from '@/i18n'
 import { formatBytes, formatLoad, formatTime, hasLoadData, isCountryFlagEmoji, isOnline, osIconName, parseLabels } from '@/utils'
+import { serverDetailHref } from '@/routes'
 
 const props = defineProps<{
   server: ServerData
@@ -188,4 +193,5 @@ const { locale, t } = useI18n()
 
 const labels = computed(() => parseLabels(props.server.labels))
 const noLoadData = computed(() => hasLoadData(props.server))
+const detailHref = computed(() => serverDetailHref(props.server.name, props.server.gid))
 </script>

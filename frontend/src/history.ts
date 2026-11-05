@@ -2,7 +2,9 @@ import type { ServerData } from '@/types'
 import type { MessageKey } from '@/i18n'
 
 export interface ChartPoint { name: number; value: [number, number] }
+export interface ChartSeries { name: string; data: ChartPoint[]; color?: string }
 export type MetricKey =
+  | 'online4' | 'online6'
   | 'cpu' | 'load_1' | 'load_5' | 'load_15'
   | 'memory_percent' | 'swap_percent' | 'hdd_percent'
   | 'network_rx' | 'network_tx' | 'traffic_in' | 'traffic_out'
@@ -67,6 +69,26 @@ function directMetric(key: MetricKey,
 }
 
 export const METRIC_OPTIONS: MetricOption[] = [
+  {
+    key: 'online4',
+    labelKey: 'metricOnline4',
+    unit: '',
+    decimals: 2,
+    max: 1,
+    dependencies: ['online4'],
+    liveValue: server => server.online4 ? 1 : 0,
+    historyValue: values => values.online4,
+  },
+  {
+    key: 'online6',
+    labelKey: 'metricOnline6',
+    unit: '',
+    decimals: 2,
+    max: 1,
+    dependencies: ['online6'],
+    liveValue: server => server.online6 ? 1 : 0,
+    historyValue: values => values.online6,
+  },
   directMetric('cpu', 'metricCpu', '%', 'cpu', 1, 100),
   directMetric('load_1', 'metricLoad1', '', 'load_1', 2),
   directMetric('load_5', 'metricLoad5', '', 'load_5', 2),
@@ -136,6 +158,7 @@ export const METRIC_OPTIONS: MetricOption[] = [
 const options = new Map(METRIC_OPTIONS.map(option => [option.key, option]))
 const memory = new Map<string, Map<MetricKey, Map<number, number>>>()
 const pendingLoads = new Map<string, Promise<ChartPoint[]>>()
+const pendingBatchLoads = new Map<string, Promise<Record<MetricKey, ChartPoint[]>>>()
 const previousNetworkCounters = new Map<string, { incoming: number; outgoing: number; ts: number }>()
 const lastPersisted = new Map<string, number>()
 const loadedFrom = new Map<string, number>()
@@ -144,6 +167,10 @@ let cleanupPromise: Promise<void> | undefined
 
 export function metricOption(metric: MetricKey) {
   return options.get(metric) || options.get('cpu')!
+}
+
+function historyHostKey(host: string, gid?: string) {
+  return gid === undefined ? host : `${host}\u0000${gid}`
 }
 
 function metricPoints(host: string, metric: MetricKey) {
@@ -345,7 +372,7 @@ function missingRanges(timestamps: number[], from: number, to: number, step: num
   return ranges.length > 8 ? [[from, to] as [number, number]] : ranges
 }
 
-async function fetchServerHistory(host: string, option: MetricOption, from: number, to: number, step: number) {
+async function fetchServerHistory(host: string, gid: string | undefined, option: MetricOption, from: number, to: number, step: number) {
   const query = new URLSearchParams({
     host,
     from: String(from),
@@ -353,6 +380,8 @@ async function fetchServerHistory(host: string, option: MetricOption, from: numb
     step: String(step),
     metrics: option.dependencies.join(','),
   })
+  if (gid !== undefined)
+    query.set('gid', gid)
   const response = await fetch(`${HISTORY_API}?${query}`)
   if (!response.ok)
     return []
@@ -385,12 +414,13 @@ export function appendLiveMetrics(server: ServerData, fallbackTimestamp: number)
   const ts = server.latest_ts || fallbackTimestamp
   if (!ts)
     return
-  const previousCounters = previousNetworkCounters.get(server.name)
+  const hostKey = historyHostKey(server.name, server.gid)
+  const previousCounters = previousNetworkCounters.get(hostKey)
   const trafficValues: Partial<Record<MetricKey, number>> = {}
   if (!previousCounters || ts - previousCounters.ts >= LIVE_SAMPLE_INTERVAL) {
     trafficValues.traffic_in = previousCounters ? Math.max(0, server.network_in - previousCounters.incoming) : 0
     trafficValues.traffic_out = previousCounters ? Math.max(0, server.network_out - previousCounters.outgoing) : 0
-    previousNetworkCounters.set(server.name, {
+    previousNetworkCounters.set(hostKey, {
       incoming: server.network_in,
       outgoing: server.network_out,
       ts,
@@ -403,7 +433,7 @@ export function appendLiveMetrics(server: ServerData, fallbackTimestamp: number)
     if (value === undefined || !Number.isFinite(value))
       continue
     snapshotValues[option.key] = value
-    const points = metricPoints(server.name, option.key)
+    const points = metricPoints(hostKey, option.key)
     const timestamps = [...points.keys()]
     const lastTimestamp = timestamps[timestamps.length - 1]
     if (lastTimestamp !== undefined && ts - lastTimestamp < LIVE_SAMPLE_INTERVAL) {
@@ -414,30 +444,31 @@ export function appendLiveMetrics(server: ServerData, fallbackTimestamp: number)
     points.set(ts, value)
   }
 
-  const previousPersist = lastPersisted.get(server.name) || 0
+  const previousPersist = lastPersisted.get(hostKey) || 0
   if (ts - previousPersist >= PERSIST_INTERVAL) {
-    lastPersisted.set(server.name, ts)
-    void writeSnapshots([{ host: server.name, ts, values: snapshotValues }])
+    lastPersisted.set(hostKey, ts)
+    void writeSnapshots([{ host: hostKey, ts, values: snapshotValues }])
   }
 }
 
-export function localMetricHistory(host: string, metric: MetricKey, rangeSeconds: number) {
-  return toChartPoints(host, metric, Math.floor(Date.now() / 1000) - rangeSeconds)
+export function localMetricHistory(host: string, metric: MetricKey, rangeSeconds: number, gid?: string) {
+  return toChartPoints(historyHostKey(host, gid), metric, Math.floor(Date.now() / 1000) - rangeSeconds)
 }
 
-export function ensureMetricHistory(host: string, metric: MetricKey, rangeSeconds: number) {
+export function ensureMetricHistory(host: string, metric: MetricKey, rangeSeconds: number, gid?: string) {
   const to = Math.floor(Date.now() / 1000)
   const from = to - rangeSeconds
-  const key = `${host}:${metric}:${rangeSeconds}`
+  const hostKey = historyHostKey(host, gid)
+  const key = `${hostKey}:${metric}:${rangeSeconds}`
   const existing = pendingLoads.get(key)
   if (existing)
     return existing
   const promise = (async () => {
     const option = metricOption(metric)
-    const points = metricPoints(host, metric)
-    if ((loadedFrom.get(host) || Number.POSITIVE_INFINITY) > from) {
-      restoreSnapshots(host, await readSnapshots(host, from, to))
-      loadedFrom.set(host, from)
+    const points = metricPoints(hostKey, metric)
+    if ((loadedFrom.get(hostKey) || Number.POSITIVE_INFINITY) > from) {
+      restoreSnapshots(hostKey, await readSnapshots(hostKey, from, to))
+      loadedFrom.set(hostKey, from)
     }
     const localTimestamps = [...points.keys()]
       .filter(ts => ts >= from && ts <= to)
@@ -445,11 +476,11 @@ export function ensureMetricHistory(host: string, metric: MetricKey, rangeSecond
     const persisted: Array<Omit<StoredSnapshot, 'size'>> = []
     for (const [gapFrom, gapTo] of missingRanges(localTimestamps, from, to, responseStep(rangeSeconds))) {
       try {
-        const history = await fetchServerHistory(host, option, gapFrom, gapTo, responseStep(rangeSeconds))
+        const history = await fetchServerHistory(host, gid, option, gapFrom, gapTo, responseStep(rangeSeconds))
         history.forEach(([ts, value]) => {
           if (!points.has(ts))
             points.set(ts, value)
-          persisted.push({ host, ts, values: { [metric]: value } })
+          persisted.push({ host: hostKey, ts, values: { [metric]: value } })
         })
       }
       catch {
@@ -457,8 +488,121 @@ export function ensureMetricHistory(host: string, metric: MetricKey, rangeSecond
       }
     }
     await writeSnapshots(persisted)
-    return localMetricHistory(host, metric, rangeSeconds)
+    return localMetricHistory(host, metric, rangeSeconds, gid)
   })().finally(() => pendingLoads.delete(key))
   pendingLoads.set(key, promise)
+  return promise
+}
+
+function mergeRanges(ranges: Array<[number, number]>) {
+  const sorted = ranges
+    .filter(([from, to]) => from <= to)
+    .sort(([left], [right]) => left - right)
+  const merged: Array<[number, number]> = []
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1]
+    if (!previous || range[0] > previous[1] + 1)
+      merged.push([...range])
+    else
+      previous[1] = Math.max(previous[1], range[1])
+  }
+  return merged.length > 8 && merged.length > 0
+    ? [[merged[0][0], merged[merged.length - 1][1]] as [number, number]]
+    : merged
+}
+
+async function fetchServerHistories(
+  host: string,
+  gid: string | undefined,
+  requested: MetricOption[],
+  from: number,
+  to: number,
+  step: number,
+) {
+  const dependencies = [...new Set(requested.flatMap(option => option.dependencies))]
+  const query = new URLSearchParams({
+    host,
+    from: String(from),
+    to: String(to),
+    step: String(step),
+    metrics: dependencies.join(','),
+  })
+  if (gid !== undefined)
+    query.set('gid', gid)
+  const response = await fetch(`${HISTORY_API}?${query}`)
+  if (!response.ok)
+    return new Map<MetricKey, Array<[number, number]>>()
+  const data = await response.json() as HistoryResponse
+  const valuesByTimestamp = new Map<number, Record<string, number>>()
+  for (const dependency of dependencies) {
+    for (const [ts, value] of data.series?.[dependency] || []) {
+      const values = valuesByTimestamp.get(ts) || {}
+      values[dependency] = value
+      valuesByTimestamp.set(ts, values)
+    }
+  }
+  const result = new Map<MetricKey, Array<[number, number]>>()
+  for (const option of requested) {
+    const values = [...valuesByTimestamp.entries()].flatMap(([ts, dependencies]) => {
+      const value = option.historyValue(dependencies)
+      return value === undefined ? [] : [[ts, value] as [number, number]]
+    })
+    result.set(option.key, values)
+  }
+  return result
+}
+
+/** Load several chart series with one history request per missing time span. */
+export function ensureMetricsHistory(host: string, metrics: MetricKey[], rangeSeconds: number, gid?: string) {
+  const uniqueMetrics = [...new Set(metrics)]
+  const hostKey = historyHostKey(host, gid)
+  const key = `${hostKey}:${uniqueMetrics.slice().sort().join(',')}:${rangeSeconds}`
+  const existing = pendingBatchLoads.get(key)
+  if (existing)
+    return existing
+
+  const promise = (async () => {
+    const to = Math.floor(Date.now() / 1000)
+    const from = to - rangeSeconds
+    const step = responseStep(rangeSeconds)
+    if ((loadedFrom.get(hostKey) || Number.POSITIVE_INFINITY) > from) {
+      restoreSnapshots(hostKey, await readSnapshots(hostKey, from, to))
+      loadedFrom.set(hostKey, from)
+    }
+
+    const ranges = mergeRanges(uniqueMetrics.flatMap((metric) => {
+      const timestamps = [...metricPoints(hostKey, metric).keys()]
+        .filter(ts => ts >= from && ts <= to)
+        .sort((left, right) => left - right)
+      return missingRanges(timestamps, from, to, step)
+    }))
+    const requested = uniqueMetrics.map(metricOption)
+    const snapshots = new Map<number, Partial<Record<MetricKey, number>>>()
+    for (const [gapFrom, gapTo] of ranges) {
+      try {
+        const histories = await fetchServerHistories(host, gid, requested, gapFrom, gapTo, step)
+        for (const [metric, points] of histories) {
+          const target = metricPoints(hostKey, metric)
+          for (const [ts, value] of points) {
+            if (!target.has(ts))
+              target.set(ts, value)
+            const values = snapshots.get(ts) || {}
+            values[metric] = value
+            snapshots.set(ts, values)
+          }
+        }
+      }
+      catch {
+        // The live browser samples remain useful if server history is disabled.
+      }
+    }
+    await writeSnapshots([...snapshots].map(([ts, values]) => ({ host: hostKey, ts, values })))
+    return Object.fromEntries(uniqueMetrics.map(metric => [
+      metric,
+      toChartPoints(hostKey, metric, from),
+    ])) as Record<MetricKey, ChartPoint[]>
+  })().finally(() => pendingBatchLoads.delete(key))
+
+  pendingBatchLoads.set(key, promise)
   return promise
 }

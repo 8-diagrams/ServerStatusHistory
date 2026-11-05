@@ -127,8 +127,7 @@
       </main>
     </div>
     <footer class="w-full border-t border-[#ebe8f2] bg-white py-4 text-center text-sm text-gray-400">
-      {{ t('poweredBy') }} <a class="text-[#7455e9]" href="https://github.com/8-diagrams/ServerStatusHistory" target="_blank" rel="noreferrer">ServerStatus-Rust</a>.
-      {{ t('theme') }} <a class="text-[#7455e9]" href="https://github.com/orilights/ServerStatus-Theme-Light" target="_blank" rel="noreferrer">Light</a> {{ t('by') }} <a class="text-[#7455e9]" href="https://orilight.top/" target="_blank" rel="noreferrer">OriLight</a>
+      {{ t('poweredBy') }} <a class="font-medium text-[#7455e9] hover:text-[#5b35c8]" href="https://github.com/8-diagrams/ServerStatusHistory" target="_blank" rel="noreferrer">ServerStatusHistory</a>
     </footer>
   </div>
 </template>
@@ -137,6 +136,7 @@
 import { useLocalStorage, useWindowSize } from '@vueuse/core'
 import type { ChartPoint, MetricKey } from './history'
 import { METRIC_OPTIONS, appendLiveMetrics, ensureMetricHistory, localMetricHistory, metricOption } from './history'
+import { HISTORY_RANGES } from './historyRanges'
 import { useI18n } from './i18n'
 import type { ServerData } from './types'
 
@@ -155,19 +155,10 @@ const metricMenuOptions = computed(() => METRIC_OPTIONS.map(option => ({
   value: option.key,
   label: t(option.labelKey),
 })))
-const rangeMenuOptions = computed(() => [
-  { value: '300', label: t('range5Minutes') },
-  { value: '900', label: t('range15Minutes') },
-  { value: '3600', label: t('range1Hour') },
-  { value: '21600', label: t('range6Hours') },
-  { value: '86400', label: t('range24Hours') },
-  { value: '604800', label: t('range7Days') },
-  { value: '2592000', label: t('range30Days') },
-  { value: '31536000', label: t('range1Year') },
-  { value: '94608000', label: t('range3Years') },
-  { value: '157680000', label: t('range5Years') },
-  { value: '315360000', label: t('range10Years') },
-])
+const rangeMenuOptions = computed(() => HISTORY_RANGES.map(range => ({
+  value: String(range.seconds),
+  label: t(range.labelKey),
+})))
 const layoutModes = [
   { value: 'grid' as const, labelKey: 'layoutGrid' as const },
   { value: 'flex' as const, labelKey: 'layoutAdaptive' as const },
@@ -364,7 +355,7 @@ function acceptServerData(data: { updated: number; servers: ServerData[] }) {
   const metric = settings.value.chartMetric as MetricKey
   for (const server of data.servers) {
     appendLiveMetrics(server, data.updated)
-    metricHistories.value[server.name] = localMetricHistory(server.name, metric, range)
+    metricHistories.value[server.name] = localMetricHistory(server.name, metric, range, server.gid)
     if (settings.value.showMetricChart)
       refreshServerMetricHistory(server, metric, range).catch(() => undefined)
   }
@@ -391,7 +382,7 @@ async function refreshServerMetricHistory(server: ServerData, metric: MetricKey,
   if (!force && Date.now() - previous < HISTORY_RETRY_INTERVAL)
     return
   historyRequests.set(key, Date.now())
-  metricHistories.value[server.name] = await ensureMetricHistory(server.name, metric, range)
+  metricHistories.value[server.name] = await ensureMetricHistory(server.name, metric, range, server.gid)
 }
 async function refreshMetricHistory() {
   if (!serverData.value || !settings.value.showMetricChart)

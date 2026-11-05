@@ -494,6 +494,12 @@ impl StatsMgr {
             .unwrap_or_else(|_| serde_json::json!({"updated": data.updated, "servers": []}))
     }
 
+    pub fn get_host(&self, name: &str, gid: Option<&str>) -> serde_json::Value {
+        let data = self.stats_data.lock().unwrap();
+        serde_json::to_value(filter_host(&data, name, gid))
+            .unwrap_or_else(|_| serde_json::json!({"updated": data.updated, "servers": []}))
+    }
+
     pub fn get_history(&self) -> Option<Arc<HistoryService>> {
         self.history.clone()
     }
@@ -564,6 +570,21 @@ fn filter_hosts(data: &StatsResp, directory: Option<&str>, tags: &[String]) -> S
                     .any(|tag| normalized_tags.contains(&tag.trim().to_lowercase()));
             directory_matches && tags_match
         })
+        .cloned()
+        .collect();
+    StatsResp {
+        updated: data.updated,
+        servers,
+    }
+}
+
+fn filter_host(data: &StatsResp, name: &str, gid: Option<&str>) -> StatsResp {
+    let name = name.trim();
+    let gid = gid.map(str::trim);
+    let servers = data
+        .servers
+        .iter()
+        .filter(|server| server.name == name && gid.is_none_or(|expected| server.gid == expected))
         .cloned()
         .collect();
     StatsResp {
@@ -688,6 +709,20 @@ mod host_query_tests {
         let result = filter_hosts(&data(), Some("default"), &tags);
         assert_eq!(result.servers.len(), 1);
         assert_eq!(result.servers[0].name, "default-1");
+    }
+
+    #[test]
+    fn single_host_query_uses_optional_gid_and_ignores_catalog_filters() {
+        let result = filter_host(&data(), "fintech-1", None);
+        assert_eq!(result.updated, 42);
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(result.servers[0].gid, "FINTECH");
+
+        let exact = filter_host(&data(), "fintech-1", Some("FINTECH"));
+        assert_eq!(exact.servers.len(), 1);
+
+        let wrong_directory = filter_host(&data(), "fintech-1", Some("MAIL"));
+        assert!(wrong_directory.servers.is_empty());
     }
 
     #[test]

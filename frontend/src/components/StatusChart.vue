@@ -1,5 +1,5 @@
 <template>
-  <VChart ref="chartRef" class="chart" :option="option" :autoresize="true" />
+  <VChart class="chart" :style="{ height: `${height}px` }" :option="option" :autoresize="true" />
 </template>
 
 <script setup lang="ts">
@@ -8,20 +8,27 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { LineSeriesOption } from 'echarts/charts'
 import { LineChart } from 'echarts/charts'
-import type { GridComponentOption, TooltipComponentOption } from 'echarts/components'
+import type { GridComponentOption, LegendComponentOption, TooltipComponentOption } from 'echarts/components'
 import {
   GridComponent,
   LegendComponent,
   TooltipComponent,
 } from 'echarts/components'
 import VChart from 'vue-echarts'
+import type { ChartPoint, ChartSeries } from '@/history'
 
-const props = defineProps<{
-  data: any[]
+const props = withDefaults(defineProps<{
+  data?: ChartPoint[]
+  series?: ChartSeries[]
   unit: string
   decimals: number
   max?: number
-}>()
+  height?: number
+}>(), {
+  data: () => [],
+  series: () => [],
+  height: 100,
+})
 
 use([
   CanvasRenderer,
@@ -34,17 +41,24 @@ use([
 type EChartsOption = ComposeOption<
   | TooltipComponentOption
   | GridComponentOption
+  | LegendComponentOption
   | LineSeriesOption
 >
 
-const chartRef = ref<any>()
 const THEME_PRIMARY = '#7455e9'
 const THEME_PRIMARY_DARK = '#5b35c8'
 const THEME_GRID = '#eeeaf7'
 const THEME_MUTED = '#8b849b'
+const SERIES_COLORS = ['#5b35c8', '#2997a8', '#d97706', '#db4b72', '#4f7fc9', '#7b8c2f']
+
+const normalizedSeries = computed<ChartSeries[]>(() => props.series.length
+  ? props.series
+  : [{ name: '', data: props.data, color: THEME_PRIMARY_DARK }])
+const showLegend = computed(() => normalizedSeries.value.length > 1)
 
 const yAxisLabelWidth = computed(() => {
-  const values = props.data
+  const values = normalizedSeries.value
+    .flatMap(series => series.data)
     .map(point => point?.value?.[1])
     .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
     .slice(-30)
@@ -55,23 +69,23 @@ const yAxisLabelWidth = computed(() => {
   return Math.min(112, Math.max(48, longest * 7 + 8))
 })
 
-watch(() => props.data, () => {
-  chartRef.value?.setOption({
-    series: [
-      {
-        data: props.data,
-      },
-    ],
-  })
-})
-
 const option = computed<EChartsOption>(() => ({
   grid: {
     left: yAxisLabelWidth.value,
     right: 20,
-    top: 10,
+    top: showLegend.value ? 34 : 10,
     bottom: 24,
   },
+  legend: showLegend.value
+    ? {
+        top: 2,
+        left: yAxisLabelWidth.value,
+        right: 12,
+        itemWidth: 16,
+        itemHeight: 3,
+        textStyle: { color: '#625b70', fontSize: 11 },
+      }
+    : undefined,
   tooltip: {
     trigger: 'axis',
     backgroundColor: 'rgba(255, 255, 255, 0.98)',
@@ -84,8 +98,14 @@ const option = computed<EChartsOption>(() => ({
     },
     extraCssText: 'border-radius: 8px; box-shadow: 0 8px 24px rgba(91, 53, 200, 0.14);',
     formatter: (params: any) => {
-      params = params[0]
-      return `<span style="color:${THEME_MUTED}">${formatTime(params.value[0])}</span><br><strong style="color:${THEME_PRIMARY_DARK};font-size:14px">${formatValue(params.value[1])}</strong>`
+      const values = Array.isArray(params) ? params : [params]
+      if (!values.length)
+        return ''
+      const lines = values.map((item: any) => {
+        const label = showLegend.value ? `${item.marker}${item.seriesName}: ` : ''
+        return `${label}<strong style="color:${item.color || THEME_PRIMARY_DARK}">${formatValue(item.value[1])}</strong>`
+      })
+      return `<span style="color:${THEME_MUTED}">${formatTime(values[0].value[0])}</span><br>${lines.join('<br>')}`
     },
     axisPointer: {
       animation: false,
@@ -145,63 +165,78 @@ const option = computed<EChartsOption>(() => ({
       },
     },
   },
-  series: [
-    {
-      data: props.data,
+  series: normalizedSeries.value.map((series, index) => {
+    const color = series.color || SERIES_COLORS[index % SERIES_COLORS.length]
+    return {
+      name: series.name,
+      data: series.data.map(point => point.value),
       type: 'line',
       smooth: 0.22,
       connectNulls: true,
       showSymbol: true,
       symbol: 'circle',
-      symbolSize: (_value: unknown, params: { dataIndex: number }) => params.dataIndex === props.data.length - 1 ? 7 : 0,
+      symbolSize: (_value: unknown, params: { dataIndex: number }) => params.dataIndex === series.data.length - 1 ? 7 : 0,
       lineStyle: {
-        color: THEME_PRIMARY_DARK,
+        color,
         width: 2.25,
       },
       itemStyle: {
-        color: THEME_PRIMARY_DARK,
+        color,
         borderColor: '#ffffff',
         borderWidth: 2,
       },
-      areaStyle: {
-        color: {
-          type: 'linear',
-          x: 0,
-          y: 0,
-          x2: 0,
-          y2: 1,
-          colorStops: [
-            { offset: 0, color: 'rgba(116, 85, 233, 0.34)' },
-            { offset: 0.62, color: 'rgba(116, 85, 233, 0.11)' },
-            { offset: 1, color: 'rgba(116, 85, 233, 0.01)' },
-          ],
-        },
-      },
+      areaStyle: showLegend.value
+        ? undefined
+        : {
+            color: {
+              type: 'linear',
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: 'rgba(116, 85, 233, 0.34)' },
+                { offset: 0.62, color: 'rgba(116, 85, 233, 0.11)' },
+                { offset: 1, color: 'rgba(116, 85, 233, 0.01)' },
+              ],
+            },
+          },
       emphasis: {
         focus: 'series',
         lineStyle: {
-          color: THEME_PRIMARY,
+          color,
           width: 3,
         },
         itemStyle: {
-          color: THEME_PRIMARY,
+          color,
         },
       },
-    },
-  ],
+    } as LineSeriesOption
+  }),
   animationDuration: 420,
   animationEasing: 'cubicOut',
 }))
 
 function formatTime(time: number) {
   const date = new Date(time)
+  const years = date.getFullYear().toString()
+  const months = (date.getMonth() + 1).toString().padStart(2, '0')
+  const days = date.getDate().toString().padStart(2, '0')
   const hours = date.getHours().toString().padStart(2, '0')
   const minutes = date.getMinutes().toString().padStart(2, '0')
   const seconds = date.getSeconds().toString().padStart(2, '0')
+  const timestamps = normalizedSeries.value.flatMap(series => series.data.map(point => point.value[0]))
+  const span = timestamps.length ? Math.max(...timestamps) - Math.min(...timestamps) : 0
+  if (span > 7 * 24 * 60 * 60 * 1000)
+    return `${years}-${months}-${days}`
+  if (span > 60 * 60 * 1000)
+    return `${months}-${days} ${hours}:${minutes}`
   return `${hours}:${minutes}:${seconds}`
 }
 
 function formatValue(value: number) {
+  if (!Number.isFinite(value))
+    return '-'
   if (props.unit === 'B' || props.unit === 'B/s')
     return `${formatBytes(value)}${props.unit === 'B/s' ? '/s' : ''}`
   return `${value.toFixed(props.decimals)}${props.unit}`
@@ -219,6 +254,5 @@ function formatBytes(bytes: number) {
 <style>
 .chart {
   width: 100%;
-  height: 100px;
 }
 </style>

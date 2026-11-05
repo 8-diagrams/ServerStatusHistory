@@ -1,7 +1,7 @@
-import App from '@/App.vue'
+import Root from '@/Root.vue'
 
 import '@/assets/tailwind.css'
 
-const app = createApp(App)
+const app = createApp(Root)
 
 app.mount('#app')
