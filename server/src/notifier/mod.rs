@@ -19,14 +19,34 @@ pub enum Event {
     NodeUp,
     NodeDown,
     Custom,
+    AlertRecovered,
 }
 
-/// Context attached to a Custom notification. Marked blocks can be selected
-/// with `allowed_rule_ids` or removed with `suppressed_rule_ids`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertRecovery {
+    pub alert_type: String,
+    pub rule_id: String,
+    pub value_percent: f64,
+    pub recover_threshold: f64,
+}
+
+/// Context attached to a notification. Marked Custom blocks can be selected
+/// with `allowed_rule_ids` or removed with `suppressed_rule_ids`; resource
+/// recovery details are carried in `recovered`.
 #[derive(Debug, Clone, Default)]
 pub struct AlertDispatch {
     pub allowed_rule_ids: Option<Vec<String>>,
     pub suppressed_rule_ids: Vec<String>,
+    pub recovered: Vec<AlertRecovery>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyOutcome {
+    /// The notifier accepted the event and queued the channel operation.
+    Queued,
+    /// The notifier intentionally did not send anything (for example an
+    /// empty or disabled template).
+    Skipped { reason: &'static str },
 }
 
 /// Split a custom template into explicit alert blocks. A block is written as:
@@ -113,14 +133,18 @@ fn get_tag(e: &Event) -> &'static str {
         Event::NodeUp => "NodeUp",
         Event::NodeDown => "NodeDown",
         Event::Custom => "Custom",
+        Event::AlertRecovered => "AlertRecovered",
     }
 }
 
 pub trait Notifier {
     fn kind(&self) -> &'static str;
-    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()>;
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<NotifyOutcome>;
     // send notify impl
     fn send_notify(&self, content: String) -> Result<()>;
+    fn send_notify_with_context(&self, content: String, _event: &str, _host: &str) -> Result<()> {
+        self.send_notify(content)
+    }
     fn notify_test(&self) -> Result<()> {
         self.send_notify("❗ServerStatus test msg".to_string())
     }
@@ -128,6 +152,12 @@ pub trait Notifier {
 
 #[cfg(test)]
 mod tests {
+    use minijinja::context;
+
+    use crate::jinja::{add_template, render_template};
+    use crate::payload::HostStat;
+
+    use super::{get_tag, AlertRecovery, Event};
     use super::select_custom_content;
 
     #[test]
@@ -149,5 +179,32 @@ mod tests {
         let content = "<!-- ss-alert:disk_usage_high -->\ndisk\n<!-- /ss-alert -->\n<!-- ss-alert:memory_usage_high -->\nmemory\n<!-- /ss-alert -->";
         let suppressed = vec!["disk_usage_high".to_string()];
         assert_eq!(select_custom_content(content, None, &suppressed), "memory");
+    }
+
+    #[test]
+    fn recovery_template_receives_structured_recovery_context() {
+        add_template(
+            "notifier-recovery-test",
+            get_tag(&Event::AlertRecovered),
+            "{% for recovery in recoveries %}{{host.name}} {{recovery.alert_type}} {{recovery.value_percent}} {{recovery.recover_threshold}}{% endfor %}".to_string(),
+        );
+        let host = HostStat {
+            name: "node-1".to_string(),
+            ..HostStat::default()
+        };
+        let recoveries = vec![AlertRecovery {
+            alert_type: "disk_usage_high".to_string(),
+            rule_id: "resource-default".to_string(),
+            value_percent: 70.0,
+            recover_threshold: 75.0,
+        }];
+        let rendered = render_template(
+            "notifier-recovery-test",
+            get_tag(&Event::AlertRecovered),
+            context!(host => host, recoveries => recoveries),
+            true,
+        )
+        .unwrap();
+        assert_eq!(rendered, "node-1 disk_usage_high 70.0 75.0");
     }
 }

@@ -154,18 +154,19 @@ chat_id = "<chat id>"
 title = "❗<b>Server Status</b>"
 online_tpl =  "{{config.title}} \n😆 {{host.location}} {{host.name}} 主机恢复上线啦"
 offline_tpl = "{{config.title}} \n😱 {{host.location}} {{host.name}} 主机已经掉线啦"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复，当前 {{recovery.value_percent | round}}%，恢复阈值 {{recovery.recover_threshold}}%{% endfor %}"
 # custom 模板置空则停用自定义告警，只保留上下线通知
 # 每个可独立收敛的分支使用 <!-- ss-alert:<rule_id> --> ... <!-- /ss-alert --> 标记。
 custom_tpl = """
-{% if host.memory_used / host.memory_total > 0.5  %}
+{% if alerts.memory_usage.enabled and host.memory_total > 0 and (host.memory_used * 100.0 / host.memory_total) >= alerts.memory_usage.threshold %}
 <!-- ss-alert:memory_usage_high -->
-<pre>😲 {{host.name}} 主机内存使用率超50%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
+<pre>😲 {{host.name}} 主机内存使用率超过 {{alerts.memory_usage.threshold}}%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
 <!-- /ss-alert -->
 {% endif %}
 
-{% if host.hdd_used / host.hdd_total  > 0.5  %}
+{% if alerts.disk_usage.enabled and host.hdd_total > 0 and (host.hdd_used * 100.0 / host.hdd_total) >= alerts.disk_usage.threshold %}
 <!-- ss-alert:disk_usage_high -->
-<pre>😲 {{host.name}} 主机硬盘使用率超50%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
+<pre>😲 {{host.name}} 主机硬盘使用率超过 {{alerts.disk_usage.threshold}}%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
 <!-- /ss-alert -->
 {% endif %}
 """
@@ -175,7 +176,7 @@ custom_tpl = """
 [log]
 enabled = false
 log_dir = "/opt/ServerStatus/logs"
-tpl = """{% set obj = dict(event=event, host=host, ip_info=ip_info, sys_info=sys_info) %} {{ obj | tojson}}"""
+tpl = """{% set obj = dict(event=event, host=host, recoveries=recoveries, ip_info=ip_info, sys_info=sys_info) %} {{ obj | tojson}}"""
 
 ###################### log end ##########################
 
@@ -188,16 +189,17 @@ agent_id = "<agent id>"
 title = "❗Server Status"
 online_tpl  = "{{config.title}} \n😆 {{host.location}} 的 {{host.name}} 主机恢复上线啦"
 offline_tpl = "{{config.title}} \n😱 {{host.location}} 的 {{host.name}} 主机已经掉线啦"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复，当前 {{recovery.value_percent | round}}%，恢复阈值 {{recovery.recover_threshold}}%{% endfor %}"
 custom_tpl = """
-{% if host.memory_used / host.memory_total > 0.8  %}
+{% if alerts.memory_usage.enabled and host.memory_total > 0 and (host.memory_used * 100.0 / host.memory_total) >= alerts.memory_usage.threshold %}
 <!-- ss-alert:memory_usage_high -->
-😲 {{host.name}} 主机内存使用率超80%
+😲 {{host.name}} 主机内存使用率超过 {{alerts.memory_usage.threshold}}%
 <!-- /ss-alert -->
 {% endif %}
 
-{% if host.hdd_used / host.hdd_total > 0.8  %}
+{% if alerts.disk_usage.enabled and host.hdd_total > 0 and (host.hdd_used * 100.0 / host.hdd_total) >= alerts.disk_usage.threshold %}
 <!-- ss-alert:disk_usage_high -->
-😲 {{host.name}} 主机硬盘使用率超80%
+😲 {{host.name}} 主机硬盘使用率超过 {{alerts.disk_usage.threshold}}%
 <!-- /ss-alert -->
 {% endif %}
 """
@@ -214,16 +216,17 @@ subject = "ServerStatus Notification"
 title = "❗<b>Server Status</b><br/>"
 online_tpl  = "{{config.title}} 😆 {{host.location}} 的 {{host.name}} 主机恢复上线啦"
 offline_tpl = "{{config.title}} 😱 {{host.location}} 的 {{host.name}} 主机已经掉线啦"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复，当前 {{recovery.value_percent | round}}%，恢复阈值 {{recovery.recover_threshold}}%{% endfor %}"
 custom_tpl = """
-{% if host.memory_used / host.memory_total > 0.8  %}
+{% if alerts.memory_usage.enabled and host.memory_total > 0 and (host.memory_used * 100.0 / host.memory_total) >= alerts.memory_usage.threshold %}
 <!-- ss-alert:memory_usage_high -->
-<pre>😲 {{host.name}} 主机内存使用率超80%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
+<pre>😲 {{host.name}} 主机内存使用率超过 {{alerts.memory_usage.threshold}}%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
 <!-- /ss-alert -->
 {% endif %}
 
-{% if host.hdd_used / host.hdd_total > 0.8  %}
+{% if alerts.disk_usage.enabled and host.hdd_total > 0 and (host.hdd_used * 100.0 / host.hdd_total) >= alerts.disk_usage.threshold %}
 <!-- ss-alert:disk_usage_high -->
-<pre>😲 {{host.name}} 主机硬盘使用率超80%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
+<pre>😲 {{host.name}} 主机硬盘使用率超过 {{alerts.disk_usage.threshold}}%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
 <!-- /ss-alert -->
 {% endif %}
 """
@@ -263,20 +266,28 @@ enabled = false
     let message = "";
     switch event {
       "Custom" => {      // 自定义事件
-          let threshold = 10;
           let msgs = [];
+          let memory_threshold = alerts.memory_usage.threshold;
+          let disk_threshold = alerts.disk_usage.threshold;
           let memory_usage = round(host.memory_used * 100.0 / host.memory_total);
-          if memory_usage > threshold {
-             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${threshold}%, 当前 ${memory_usage}%`);
+          if alerts.memory_usage.enabled && host.memory_total > 0 && memory_usage >= memory_threshold {
+             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${memory_threshold}%, 当前 ${memory_usage}%`);
           }
           let hdd_usage = round(host.hdd_used * 100.0 / host.hdd_total);
-          if hdd_usage > threshold {
-              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${threshold}%, 当前 ${hdd_usage}%`);
+          if alerts.disk_usage.enabled && host.hdd_total > 0 && hdd_usage >= disk_threshold {
+              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${disk_threshold}%, 当前 ${hdd_usage}%`);
           }
           message = join(msgs, "\\n");
       },
       "NodeDown" => {   // 掉线
           message = `😱 ${host.location} ${host.name} 主机已经掉线啦`;
+      },
+      "AlertRecovered" => {
+          let msgs = [];
+          for recovery in recoveries {
+              msgs.push(`✅ ${host.location} ${host.name} ${recovery.alert_type} 已恢复，当前 ${round(recovery.value_percent)}%`);
+          }
+          message = join(msgs, "\\n");
       },
       "NodeUp" => {     // 上线
           message = `😆 ${host.location} ${host.name} 主机恢复上线啦`;
@@ -305,20 +316,28 @@ enabled = false
     let message = "";
     switch event {
       "Custom" => {      // 自定义事件
-          let threshold = 80;
           let msgs = [];
+          let memory_threshold = alerts.memory_usage.threshold;
+          let disk_threshold = alerts.disk_usage.threshold;
           let memory_usage = round(host.memory_used * 100.0 / host.memory_total);
-          if memory_usage > threshold {
-             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${threshold}%, 当前 ${memory_usage}%`);
+          if alerts.memory_usage.enabled && host.memory_total > 0 && memory_usage >= memory_threshold {
+             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${memory_threshold}%, 当前 ${memory_usage}%`);
           }
           let hdd_usage = round(host.hdd_used * 100.0 / host.hdd_total);
-          if hdd_usage > threshold {
-              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${threshold}%, 当前 ${hdd_usage}%`);
+          if alerts.disk_usage.enabled && host.hdd_total > 0 && hdd_usage >= disk_threshold {
+              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${disk_threshold}%, 当前 ${hdd_usage}%`);
           }
           message = join(msgs, "\\n");
       },
       "NodeDown" => {   // 掉线
           message = `😱 ${host.location} ${host.name} 主机已经掉线啦`;
+      },
+      "AlertRecovered" => {
+          let msgs = [];
+          for recovery in recoveries {
+              msgs.push(`✅ ${host.location} ${host.name} ${recovery.alert_type} 已恢复，当前 ${round(recovery.value_percent)}%`);
+          }
+          message = join(msgs, "\\n");
       },
       "NodeUp" => {     // 上线
           message = `😆 ${host.location} ${host.name} 主机恢复上线啦`;
@@ -339,20 +358,28 @@ enabled = false
     let message = "";
     switch event {
       "Custom" => {      // 自定义事件
-          let threshold = 80;
           let msgs = [];
+          let memory_threshold = alerts.memory_usage.threshold;
+          let disk_threshold = alerts.disk_usage.threshold;
           let memory_usage = round(host.memory_used * 100.0 / host.memory_total);
-          if memory_usage > threshold {
-             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${threshold}%, 当前 ${memory_usage}%`);
+          if alerts.memory_usage.enabled && host.memory_total > 0 && memory_usage >= memory_threshold {
+             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${memory_threshold}%, 当前 ${memory_usage}%`);
           }
           let hdd_usage = round(host.hdd_used * 100.0 / host.hdd_total);
-          if hdd_usage > threshold {
-              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${threshold}%, 当前 ${hdd_usage}%`);
+          if alerts.disk_usage.enabled && host.hdd_total > 0 && hdd_usage >= disk_threshold {
+              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${disk_threshold}%, 当前 ${hdd_usage}%`);
           }
           message = join(msgs, "\\n");
       },
       "NodeDown" => {   // 掉线
           message = `😱 ${host.location} ${host.name} 主机已经掉线啦`;
+      },
+      "AlertRecovered" => {
+          let msgs = [];
+          for recovery in recoveries {
+              msgs.push(`✅ ${host.location} ${host.name} ${recovery.alert_type} 已恢复，当前 ${round(recovery.value_percent)}%`);
+          }
+          message = join(msgs, "\\n");
       },
       "NodeUp" => {     // 上线
           message = `😆 ${host.location} ${host.name} 主机恢复上线啦`;
@@ -379,21 +406,28 @@ enabled = false
     let message = "";
     switch event {
       "Custom" => {      // 自定义事件
-          // 使用率阈值，这里是磁盘 超 70% 告警
-          let threshold = 70;
           let msgs = [];
+          let memory_threshold = alerts.memory_usage.threshold;
+          let disk_threshold = alerts.disk_usage.threshold;
           let memory_usage = round(host.memory_used * 100.0 / host.memory_total);
-          if memory_usage > threshold {
-             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${threshold}%, 当前 ${memory_usage}%`);
+          if alerts.memory_usage.enabled && host.memory_total > 0 && memory_usage >= memory_threshold {
+             msgs.push(`😲 ${host.location} ${host.name} 主机内存使用率超${memory_threshold}%, 当前 ${memory_usage}%`);
           }
           let hdd_usage = round(host.hdd_used * 100.0 / host.hdd_total);
-          if hdd_usage > threshold {
-              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${threshold}%, 当前 ${hdd_usage}%`);
+          if alerts.disk_usage.enabled && host.hdd_total > 0 && hdd_usage >= disk_threshold {
+              msgs.push(`😲 ${host.location} ${host.name} 主机硬盘使用率超${disk_threshold}%, 当前 ${hdd_usage}%`);
           }
           message = join(msgs, "\\n");
       },
       "NodeDown" => {   // 掉线
           message = `😱 ${host.location} ${host.name} 主机已经掉线啦`;
+      },
+      "AlertRecovered" => {
+          let msgs = [];
+          for recovery in recoveries {
+              msgs.push(`✅ ${host.location} ${host.name} ${recovery.alert_type} 已恢复，当前 ${round(recovery.value_percent)}%`);
+          }
+          message = join(msgs, "\\n");
       },
       "NodeUp" => {     // 上线
           message = `😆 ${host.location} ${host.name} 主机恢复上线啦`;

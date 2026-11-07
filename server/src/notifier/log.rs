@@ -1,7 +1,7 @@
 #![deny(warnings)]
 use anyhow::Result;
 use chrono::Local;
-use log::warn;
+use log::{info, warn};
 use minijinja::context;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -10,7 +10,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "log";
 
@@ -23,11 +23,12 @@ pub struct Config {
 
 pub struct Log {
     config: &'static Config,
+    alerts: &'static crate::config::AlertsConfig,
 }
 
 impl Log {
-    pub fn new(cfg: &'static Config) -> Self {
-        let o = Self { config: cfg };
+    pub fn new(cfg: &'static Config, alerts: &'static crate::config::AlertsConfig) -> Self {
+        let o = Self { config: cfg, alerts };
 
         add_template(KIND, "tpl", o.config.tpl.clone());
 
@@ -43,6 +44,10 @@ impl crate::notifier::Notifier for Log {
     }
 
     fn send_notify(&self, content: String) -> Result<()> {
+        self.send_notify_with_context(content, "NotifyTest", "-")
+    }
+
+    fn send_notify_with_context(&self, content: String, event: &str, host: &str) -> Result<()> {
         if content.is_empty() {
             return Ok(());
         }
@@ -52,6 +57,8 @@ impl crate::notifier::Notifier for Log {
             .join(format!("ssr.log.{dt}"))
             .to_string_lossy()
             .to_string();
+        let event = event.to_string();
+        let host = host.to_string();
 
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
         handle.spawn(async move {
@@ -79,24 +86,31 @@ impl crate::notifier::Notifier for Log {
             file.flush()
                 .await
                 .unwrap_or_else(|_| panic!("can't flush log `{log_file}"));
+            info!("alert delivery sent notifier=log event={} host={} file={}", event, host, log_file);
         });
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<NotifyOutcome> {
         if matches!(e, Event::Custom) && !dispatch.suppressed_rule_ids.is_empty() {
             warn!(
                 "log notifier suppressed unstructured custom event rules={:?} host={}",
                 dispatch.suppressed_rule_ids, stat.name
             );
-            return Ok(());
+            return Ok(NotifyOutcome::Skipped { reason: "suppressed" });
         }
-        render_template(
+        let content = render_template(
             self.kind(),
             "tpl",
-            context!(event => e, host => stat, config => self.config, ip_info => stat.ip_info, sys_info => stat.sys_info),
+            context!(event => e, host => stat, config => self.config, alerts => self.alerts, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info),
             true,
-        )
-        .map(|content| self.send_notify(content).unwrap())
+        )?;
+        if content.is_empty() {
+            info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);
+            return Ok(NotifyOutcome::Skipped { reason: "empty_template" });
+        }
+        info!("alert delivery attempt notifier={} event={e:?} host={} gid={}", self.kind(), stat.name, stat.gid);
+        self.send_notify_with_context(content, crate::notifier::get_tag(e), &stat.name)?;
+        Ok(NotifyOutcome::Queued)
     }
 }

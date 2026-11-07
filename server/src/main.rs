@@ -44,7 +44,7 @@ static G_STATS_MGR: OnceCell<crate::stats::StatsMgr> = OnceCell::new();
 #[derive(Parser, Debug)]
 #[command(author, version = env!("APP_VERSION"), about, long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, global = true, default_value = "config.toml")]
     config: String,
     #[arg(short = 't', long, help = "config test, default:false")]
     config_test: bool,
@@ -60,6 +60,25 @@ struct Args {
 enum ServerCommand {
     /// Inspect, compact, or delete historical metric data.
     History(history::HistoryCli),
+    /// Manage and migrate server configuration files.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Upgrade an old config.toml, preserving a timestamped backup.
+    Migrate {
+        /// Write the migrated file to another path instead of replacing the input.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Show the migrated content without writing or creating a backup.
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow replacing an existing different output path.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn create_app_router() -> Router {
@@ -130,6 +149,15 @@ async fn main() -> Result<(), anyhow::Error> {
         process::exit(0);
     }
 
+    if let Some(ServerCommand::Config(ConfigCommand::Migrate { output, dry_run, force })) = &args.command {
+        let report = config::migrate_file(&args.config, output.as_deref(), *dry_run, *force)?;
+        eprintln!("✨ {}", report.message);
+        if let Some(backup) = report.backup {
+            eprintln!("✨ backup: {}", backup.display());
+        }
+        return Ok(());
+    }
+
     // config load
     if let Some(cfg) = if args.cloud {
         // export SRV_CONF=$(cat config.toml)
@@ -160,23 +188,23 @@ async fn main() -> Result<(), anyhow::Error> {
     let cfg = G_CONFIG.get().unwrap();
     let notifies: Arc<Mutex<Vec<Box<dyn notifier::Notifier + Send>>>> = Arc::new(Mutex::new(Vec::new()));
     if cfg.tgbot.enabled {
-        let o = Box::new(notifier::tgbot::TGBot::new(&cfg.tgbot));
+        let o = Box::new(notifier::tgbot::TGBot::new(&cfg.tgbot, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
     if cfg.wechat.enabled {
-        let o = Box::new(notifier::wechat::WeChat::new(&cfg.wechat));
+        let o = Box::new(notifier::wechat::WeChat::new(&cfg.wechat, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
     if cfg.email.enabled {
-        let o = Box::new(notifier::email::Email::new(&cfg.email));
+        let o = Box::new(notifier::email::Email::new(&cfg.email, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
     if cfg.log.enabled {
-        let o = Box::new(notifier::log::Log::new(&cfg.log));
+        let o = Box::new(notifier::log::Log::new(&cfg.log, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
     if cfg.webhook.enabled {
-        let o = Box::new(notifier::webhook::Webhook::new(&cfg.webhook));
+        let o = Box::new(notifier::webhook::Webhook::new(&cfg.webhook, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
     // init notifier end

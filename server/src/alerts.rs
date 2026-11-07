@@ -5,21 +5,25 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 use crate::config::{AlertConvergenceRule, AlertConvergenceWindow, AlertsConfig};
+use crate::notifier::AlertRecovery;
 use crate::payload::HostStat;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AlertDecision {
     /// The alert may be delivered. The value is the number of suppressed
     /// occurrences since the previous delivery.
     Send { suppressed_count: u64 },
     /// The alert is currently within its convergence window.
     Suppress,
+    /// The alert was active and crossed its recovery threshold.
+    Recovered { value_percent: f64 },
 }
 
 #[derive(Debug, Default)]
 pub struct CustomEvaluation {
     pub should_send: bool,
     pub suppressed_rule_ids: Vec<String>,
+    pub recovered: Vec<AlertRecovery>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +100,11 @@ impl AlertManager {
     /// block in the same custom template.
     pub fn evaluate_custom(&mut self, stat: &HostStat, now: u64) -> CustomEvaluation {
         if !self.enabled() {
-            return CustomEvaluation { should_send: true, suppressed_rule_ids: Vec::new() };
+            return CustomEvaluation {
+                should_send: true,
+                suppressed_rule_ids: Vec::new(),
+                recovered: Vec::new(),
+            };
         }
         let candidates = [
             (
@@ -117,6 +125,7 @@ impl AlertManager {
         let mut known_active = false;
         let mut should_send = false;
         let mut suppressed_rule_ids = Vec::new();
+        let mut recovered = Vec::new();
         for (alert_type, value, enabled, threshold, recover_threshold) in candidates {
             if !enabled || self.rule_for(alert_type).is_none() {
                 continue;
@@ -129,19 +138,37 @@ impl AlertManager {
                 match self.evaluate_metric(alert_type, value, threshold, recover_threshold, stat, now) {
                     AlertDecision::Send { .. } => should_send = true,
                     AlertDecision::Suppress => suppressed_rule_ids.push(alert_type.to_string()),
+                    AlertDecision::Recovered { .. } => {}
                 }
             } else {
                 // Clear a previous state after recovery even when the value is
                 // below the trigger threshold on this check.
-                let _ = self.evaluate_metric(alert_type, value, threshold, recover_threshold, stat, now);
+                if let AlertDecision::Recovered { value_percent } =
+                    self.evaluate_metric(alert_type, value, threshold, recover_threshold, stat, now)
+                {
+                    if let Some(rule) = self.rule_for(alert_type) {
+                        recovered.push(AlertRecovery {
+                            alert_type: alert_type.to_string(),
+                            rule_id: rule.id.clone(),
+                            value_percent,
+                            recover_threshold,
+                        });
+                    }
+                }
             }
         }
         if !known_active {
             // No structured resource is currently active. Preserve the old
-            // behavior so a legacy custom template can still emit content.
-            should_send = true;
+            // behavior so a legacy custom template can still emit content,
+            // except on a recovery-only tick where the dedicated recovery
+            // event is the only notification that should be emitted.
+            should_send = recovered.is_empty();
         }
-        CustomEvaluation { should_send, suppressed_rule_ids }
+        CustomEvaluation {
+            should_send,
+            suppressed_rule_ids,
+            recovered,
+        }
     }
 
     /// Apply a configured convergence rule to a percentage-based alert. This
@@ -166,18 +193,28 @@ impl AlertManager {
         let windows = rule.windows.clone();
         let fingerprint = format!("{}:{}:{}:{}", rule_id, alert_type, stat.name, stat.gid);
         if value_percent <= recover_threshold {
-            match self.remove_state(&fingerprint) {
-                Ok(true) => info!(
-                    "alert resolved rule={} alert_type={} host={} gid={} value_percent={value_percent:.2} recover_threshold={recover_threshold}",
-                    rule_id, alert_type, stat.name, stat.gid
-                ),
-                Ok(false) => {}
-                Err(error) => error!(
-                    "alert state delete failed rule={} alert_type={} host={} error={error:#}",
-                    rule_id, alert_type, stat.name
-                ),
-            }
-            return AlertDecision::Send { suppressed_count: 0 };
+            let was_active = match self.remove_state(&fingerprint) {
+                Ok(true) => {
+                    info!(
+                        "alert resolved rule={} alert_type={} host={} gid={} value_percent={value_percent:.2} recover_threshold={recover_threshold}",
+                        rule_id, alert_type, stat.name, stat.gid
+                    );
+                    true
+                }
+                Ok(false) => false,
+                Err(error) => {
+                    error!(
+                        "alert state delete failed rule={} alert_type={} host={} error={error:#}",
+                        rule_id, alert_type, stat.name
+                    );
+                    false
+                }
+            };
+            return if was_active {
+                AlertDecision::Recovered { value_percent }
+            } else {
+                AlertDecision::Send { suppressed_count: 0 }
+            };
         }
         if value_percent < threshold {
             return AlertDecision::Send { suppressed_count: 0 };
@@ -427,12 +464,32 @@ mod tests {
         );
         assert_eq!(
             manager.evaluate_disk(&recovered, 1),
-            AlertDecision::Send { suppressed_count: 0 }
+            AlertDecision::Recovered { value_percent: 70.0 }
         );
         assert_eq!(
             manager.evaluate_disk(&high, 2),
             AlertDecision::Send { suppressed_count: 0 }
         );
+    }
+
+    #[test]
+    fn custom_evaluation_emits_one_recovery_transition() {
+        let mut manager = manager();
+        let high = stat(90, 100);
+        let recovered = stat(70, 100);
+
+        let first = manager.evaluate_custom(&high, 0);
+        assert!(first.should_send);
+        assert!(first.recovered.is_empty());
+
+        let transition = manager.evaluate_custom(&recovered, 1);
+        assert!(!transition.should_send);
+        assert_eq!(transition.recovered.len(), 1);
+        assert_eq!(transition.recovered[0].alert_type, "disk_usage_high");
+        assert_eq!(transition.recovered[0].value_percent, 70.0);
+
+        let stable = manager.evaluate_custom(&recovered, 2);
+        assert!(stable.recovered.is_empty());
     }
 
     #[test]
@@ -505,6 +562,7 @@ mod tests {
         let first = manager.evaluate_custom(&disk_only, 0);
         assert!(first.should_send);
         assert!(first.suppressed_rule_ids.is_empty());
+        assert!(first.recovered.is_empty());
 
         let second = manager.evaluate_custom(&both_high, 1);
         assert!(second.should_send);

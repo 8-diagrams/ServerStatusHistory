@@ -22,15 +22,16 @@
 - Webhook/Rhai：[server/src/notifier/webhook.rs](server/src/notifier/webhook.rs)
 - 当前完整示例：[config.toml](config.toml)
 
-事件枚举只有三种：
+事件枚举包括主机状态、资源告警和资源恢复：
 
 | 事件 | 含义 | 典型用途 |
 | --- | --- | --- |
 | `NodeUp` | 主机在一段时间没有上报后重新上报 | 恢复通知 |
 | `NodeDown` | 服务端判定主机从在线变为离线 | 掉线通知 |
 | `Custom` | 主机仍在线，周期性执行自定义规则 | 内存、磁盘等指标阈值 |
+| `AlertRecovered` | 资源告警从 active 降到 `recover_threshold` 或以下 | 磁盘、内存等恢复通知 |
 
-这不是一个带告警等级、确认（ack）、静默窗口和升级策略的完整规则引擎。第一版已为磁盘占用告警增加 SQLite 收敛状态；其他 `Custom` 规则仍由模板或 Webhook 脚本自行决定是否输出内容。
+这不是一个带告警等级、确认（ack）、静默窗口和升级策略的完整规则引擎。当前版本已为磁盘和内存占用告警增加 SQLite 收敛状态；其他 `Custom` 规则仍由模板或 Webhook 脚本自行决定是否输出内容。
 
 ## 2. 事件触发逻辑
 
@@ -56,7 +57,31 @@
 
 因此，若自定义模板条件持续满足，告警会按通知间隔重复发送；当前没有“只在首次越过阈值时发送一次”的内置边沿检测。
 
-### 2.3 通知节流和允许开关
+### 2.3 资源告警恢复
+
+资源告警恢复是独立事件，不复用 `NodeUp`。例如磁盘从 85% 降到 75% 或以下时：
+
+1. 服务端删除该主机、规则和告警类型对应的 SQLite 状态；
+2. 记录 `alert resolved` 日志；
+3. 生成一次 `AlertRecovered` 事件；
+4. 使用各通知器的 `recovery_tpl` 发送恢复通知；
+5. 在下一次仍低于恢复阈值的检查中不重复发送。
+
+如果磁盘只从 85% 降到 78%，仍处于恢复滞回区间，不会恢复，也不会重复发送恢复通知。之后再次超过 80% 会开始新的告警周期。
+
+默认恢复模板可以使用：
+
+```jinja
+{% for recovery in recoveries %}
+✅ {{host.name}} {{recovery.alert_type}} 已恢复，
+当前 {{recovery.value_percent | round}}%，
+恢复阈值 {{recovery.recover_threshold}}%
+{% endfor %}
+```
+
+当前内置的 Telegram、企业微信和邮件通知器支持 `recovery_tpl`；文件日志通过 `recoveries` 字段记录恢复事件；Webhook Rhai 脚本可以使用 `event == "AlertRecovered"` 和 `recoveries` 数组自行构造消息。旧配置缺少 `recovery_tpl` 时使用内置默认模板，不影响 Agent 或旧配置启动。
+
+### 2.4 通知节流和允许开关
 
 全局配置：
 
@@ -128,6 +153,7 @@ chat_id = "-1001234567890"
 title = "❗<b>Server Status</b>"
 online_tpl = "{{config.title}}\n😆 {{host.name}} 恢复上线"
 offline_tpl = "{{config.title}}\n😱 {{host.name}} 已掉线"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复{% endfor %}"
 custom_tpl = """
 {% if host.memory_total > 0 and host.memory_used / host.memory_total > 0.8 %}
 😲 {{host.name}} 内存使用率超过 80%
@@ -142,6 +168,7 @@ custom_tpl = """
 | `chat_id` | 目标会话或群组 ID |
 | `title` | 模板中的 `config.title`；Telegram 以 HTML parse mode 发送 |
 | `online_tpl` / `offline_tpl` | `NodeUp` / `NodeDown` 的 Jinja 模板 |
+| `recovery_tpl` | `AlertRecovered` 的 Jinja 模板；上下文包含 `recoveries` |
 | `custom_tpl` | `Custom` 的 Jinja 模板，空内容不发送 |
 
 请求使用 Telegram `sendMessage`，超时为 5 秒。模板中使用 HTML 时应遵守 Telegram HTML 格式。
@@ -159,6 +186,7 @@ agent_id = "1000002"
 title = "❗Server Status"
 online_tpl = "{{config.title}}\n{{host.name}} 恢复上线"
 offline_tpl = "{{config.title}}\n{{host.name}} 已掉线"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复{% endfor %}"
 custom_tpl = """
 {% if host.hdd_total > 0 and host.hdd_used / host.hdd_total > 0.8 %}
 {{host.name}} 硬盘使用率超过 80%
@@ -183,6 +211,7 @@ subject = "ServerStatus Notification"
 title = "❗<b>Server Status</b><br/>"
 online_tpl = "{{config.title}} {{host.name}} 恢复上线"
 offline_tpl = "{{config.title}} {{host.name}} 已掉线"
+recovery_tpl = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复{% endfor %}"
 custom_tpl = """
 {% if host.memory_total > 0 and host.memory_used / host.memory_total > 0.8 %}
 <p>{{host.name}} 内存使用率超过 80%</p>
@@ -383,11 +412,13 @@ Jinja 的自由文本输出本身没有告警 ID，服务端不能可靠地从�
 
 服务端先按指标计算收敛状态，再把被收敛的规则 ID 传给通知器。通知器渲染模板后只移除对应标记块，其他告警块仍可发送。例如磁盘告警被抑制而内存告警未被抑制时，只移除 `disk_usage_high` 块，不会丢弃内存消息。
 
+模板条件建议同时检查对应的 `enabled`：`alerts.disk_usage.enabled` 或 `alerts.memory_usage.enabled`。这样关闭某一类结构化告警时，后端检测、收敛和模板输出会保持一致；阈值条件则统一引用 `alerts.*.threshold`，不要在模板中再次硬编码百分比。
+
 旧的未标记 `custom_tpl` 仍可以启动和发送，启动时会输出 `custom template is unclassified` 警告；当需要抑制其中某一条告警时，因为无法安全拆分，服务端会保守地抑制整段旧模板。要获得精确收敛，必须给每个分支加上上述标记。服务端不会按文案、正则或模板渲染结果猜测规则 ID，避免误匹配。
 
 目前标记解析已接入 Telegram、企业微信和邮件的 `custom_tpl`；Webhook 使用 Rhai 脚本自行决定发送内容，建议在脚本中显式使用同样的告警 ID，并由后续结构化规则接入统一收敛器。
 
-旧模板未加标记时，磁盘分支仍使用磁盘告警的状态指纹，但无法做到同一模板内部的独立收敛；迁移到标记块后，状态指纹使用 `rule_id:<alert_type>:<host>:<gid>`，使不同告警互不影响。
+旧模板未加标记时，资源分支仍使用对应告警的状态指纹，但无法做到同一模板内部的独立收敛；迁移到标记块后，状态指纹使用 `rule_id:<alert_type>:<host>:<gid>`，使不同告警互不影响。
 
 ### 6.3 必须输出的配置来源日志
 
@@ -454,6 +485,51 @@ pub struct ConfigLoadReport {
 4. 回滚到旧二进制时，新版新增的 TOML 段可能被旧版忽略，因此部署文档应提示：若需要回滚，先保留一份旧格式配置，避免把新版专用段带回旧程序。
 5. 告警状态库是可选的：若路径不可写，应记录明确错误。第一版可降级为内存状态并给出 `WARN`，但必须说明重启会丢失收敛计数；生产环境建议将 `data/alerts.db` 放在可持久化目录并纳入备份。
 
+### 6.6 使用 `config migrate` 升级旧配置
+
+新版服务端内置配置迁移命令。它只改造告警相关配置，不改变 Agent 上报协议，也不会删除旧配置注释或其他业务段落：
+
+```bash
+# 先预览，不写文件、不创建备份
+./stat_server --config /opt/ServerStatus/config.toml config migrate --dry-run
+
+# 原地升级；成功前先创建备份
+./stat_server --config /opt/ServerStatus/config.toml config migrate
+
+# 写入新文件，不覆盖已有目标文件
+./stat_server --config /opt/ServerStatus/old.toml config migrate \
+  --output /opt/ServerStatus/config.new.toml
+
+# 目标文件已存在时，明确允许覆盖
+./stat_server --config /opt/ServerStatus/old.toml config migrate \
+  --output /opt/ServerStatus/config.new.toml --force
+```
+
+迁移前会先校验输入 TOML，生成结果后再次校验；实际写入使用临时文件再原子替换。原地迁移会在同目录创建：
+
+```text
+config.toml.bak.20261107010901
+```
+
+如果同一秒已有同名备份，会自动追加 `.1`、`.2` 等后缀。`--dry-run` 不会创建任何备份。即使配置已经是新版格式，命令仍会保留一份原文件备份，并报告 `changes=0`，便于审计。
+
+迁移器会补齐缺失的 `[alerts]`、`disk_usage`、`memory_usage`、收敛规则和模板标记；已有字段的值不会被默认值覆盖。旧模板中无法识别的自定义写法不会强行改写，命令完成后应人工检查模板和日志。
+
+迁移完成后建议执行：
+
+```bash
+./stat_server --config /opt/ServerStatus/config.toml -t
+```
+
+确认无误后再重启服务端。回滚时先停止服务，再用备份替换配置，例如：
+
+```bash
+cp /opt/ServerStatus/config.toml.bak.20261107010901 \
+   /opt/ServerStatus/config.toml
+```
+
+若要回滚到旧版二进制，建议同时恢复迁移前的配置；旧版可能忽略或不理解新版专用的 `[alerts]` 段。备份文件中可能包含通知凭据，应与原配置使用同样的文件权限保护。
+
 ## 7. 推荐设置方案
 
 ### 仅监控上下线
@@ -469,7 +545,7 @@ pub struct ConfigLoadReport {
 - CPU：`cpu / 100`
 - Swap：`swap_used / swap_total`
 
-磁盘告警第一版可直接配置：
+磁盘告警可直接配置：
 
 ```toml
 [alerts.disk_usage]
@@ -478,7 +554,7 @@ threshold = 80.0
 recover_threshold = 75.0
 ```
 
-磁盘占用达到 `threshold` 后，服务端在产生 `Custom` 事件前按 `alerts.convergence_rules` 收敛；降到 `recover_threshold` 或更低时清除状态。其他尚未结构化的自由格式 `Custom` 告警仍受 `notify_interval` 影响，建议为这类规则配置合适的检查周期。
+磁盘或内存占用达到各自的 `threshold` 后，服务端在产生 `Custom` 事件前按 `alerts.convergence_rules` 收敛；降到各自的 `recover_threshold` 或更低时清除状态。其他尚未结构化的自由格式 `Custom` 告警仍受 `notify_interval` 影响，建议为这类规则配置合适的检查周期。
 
 ### 只记录不推送
 
@@ -500,12 +576,56 @@ recover_threshold = 75.0
 8. 邮件检查 SMTP 是否允许 STARTTLS，以及 `to` 中的地址格式。
 9. 日志通知检查 `log_dir` 权限，并用 logrotate 管理文件大小和保留时间。
 
+## 8.1 用服务端日志追踪告警和通知
+
+建议生产服务使用 `RUST_LOG=info`。一次恢复事件的典型链路如下：
+
+```text
+alert resolved ... alert_type=disk_usage_high ...
+alert event detected event=AlertRecovered host=node-1 gid=...
+alert delivery queue=accepted event=AlertRecovered host=node-1
+alert delivery accepted notifier=tgbot event=AlertRecovered host=node-1 status=queued
+alert delivery sent notifier=tgbot event=AlertRecovered host=node-1 status=200 OK
+```
+
+各日志含义：
+
+- `alert resolved`：告警状态机确认发生了 active → recovered，并清理 SQLite 状态；
+- `alert event detected`：服务端生成了独立事件；
+- `alert delivery queue=accepted`：事件成功进入通知队列；如果出现 `queue_failed`，表示还没有到达任何通知器；
+- `alert delivery accepted`：某个通道的模板已经有内容，并接受了发送任务；`skipped` 表示模板为空、Webhook 脚本过滤或没有启用 receiver；
+- `alert delivery sent`：异步 HTTP、SMTP 或文件写入完成；
+- `alert delivery failed`：通道连接、认证、SMTP、Webhook 或文件写入失败。
+
+例如只看恢复事件：
+
+```bash
+RUST_LOG=info ./stat_server --config /opt/ServerStatus/config.toml 2>&1 \
+  | grep -E 'alert (resolved|event detected|delivery)|AlertRecovered'
+```
+
+如果服务由 systemd 管理：
+
+```bash
+journalctl -u serverstatus -f -o cat \
+  | grep -E 'alert (resolved|event detected|delivery)|AlertRecovered'
+```
+
+只检查某台主机：
+
+```bash
+journalctl -u serverstatus -f -o cat \
+  | grep -E 'host=node-1|host="node-1"'
+```
+
+注意：`accepted/queued` 表示服务端已把任务交给异步通道，不等同于对端业务确认；是否真正完成，要继续观察同一 `notifier` 的 `sent` 或 `failed` 日志。Telegram、企业微信、Webhook 会记录 HTTP 状态，邮件记录 SMTP 成功或失败，文件日志记录写入文件路径。
+
 ## 9. 当前实现边界和后续可改进点
 
 - `notify_interval` 是全局节流，尚未做到按主机、按规则、按渠道独立限流。
-- 磁盘占用告警已经按规则、主机和目录持久化收敛状态；其他尚未结构化的 `Custom` 告警仍没有独立的阈值边沿状态。
-- 未标记的自由格式 `custom_tpl` 无法把最终渲染内容反向映射为具体告警类型，因此在磁盘告警收敛时会保守地整体抑制；使用 `ss-alert` 标记块后，服务端只移除对应告警块，其他告警可以继续发送。
-- 没有恢复事件对应的自定义规则状态；只有主机上下线恢复（`NodeUp`）。
+- 磁盘和内存占用告警已经按规则、主机和目录持久化收敛状态；其他尚未结构化的 `Custom` 告警仍没有独立的阈值边沿状态。
+- 未标记的自由格式 `custom_tpl` 无法把最终渲染内容反向映射为具体告警类型，因此在资源告警收敛时会保守地整体抑制；使用 `ss-alert` 标记块后，服务端只移除对应告警块，其他告警可以继续发送。
+- `AlertRecovered` 目前只覆盖结构化的磁盘和内存规则；尚未结构化的自由格式 `Custom` 规则不会自动推导恢复事件。
 - Webhook 是同步构建脚本、异步发送 HTTP；没有重试、签名、失败队列或持久化投递记录。
 - 企业微信每次发送都重新取 token，没有 token 缓存。
 - 邮件适配器固定使用 STARTTLS；没有连接池、重试和可配置 TLS 模式。

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::Duration;
 
-use crate::notifier::{get_tag, AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "webhook";
 
@@ -33,6 +33,7 @@ pub struct Config {
 
 pub struct Webhook {
     config: &'static Config,
+    alerts: &'static crate::config::AlertsConfig,
     http_client: reqwest::Client,
     engine: Engine,
     ast_list: Vec<Option<AST>>,
@@ -57,9 +58,10 @@ fn to_json(o: Dynamic) -> ImmutableString {
 }
 
 impl Webhook {
-    pub fn new(cfg: &'static Config) -> Self {
+    pub fn new(cfg: &'static Config, alerts: &'static crate::config::AlertsConfig) -> Self {
         let mut o = Self {
             config: cfg,
+            alerts,
             http_client: reqwest::Client::new(),
             engine: Engine::new(),
             ast_list: Vec::new(),
@@ -80,13 +82,15 @@ impl Webhook {
 
         o
     }
-    fn call_webhook(&self, r: &'static Receiver, content: String) {
+    fn call_webhook(&self, r: &'static Receiver, content: String, event: &str, host: &str) {
         if content.is_empty() {
             return;
         }
 
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
         let http_client = self.http_client.clone();
+        let event = event.to_string();
+        let host = host.to_string();
         handle.spawn(async move {
             let mut http_client_builder = http_client
                 .post(&r.url)
@@ -106,10 +110,15 @@ impl Webhook {
             //
             match http_client_builder.send().await {
                 Ok(resp) => {
-                    info!("webhook send msg resp => {resp:?}");
+                    let status = resp.status();
+                    if status.is_success() {
+                        info!("alert delivery sent notifier=webhook event={} host={} status={status}", event, host);
+                    } else {
+                        error!("alert delivery failed notifier=webhook event={} host={} status={status}", event, host);
+                    }
                 }
                 Err(err) => {
-                    error!("webhook send msg error => {err:?}");
+                    error!("alert delivery failed notifier=webhook event={} host={} error={err}", event, host);
                 }
             }
         });
@@ -130,28 +139,33 @@ impl crate::notifier::Notifier for Webhook {
             if !r.enabled {
                 continue;
             }
-            self.call_webhook(r, "❗ServerStatus test msg".into());
+            self.call_webhook(r, "❗ServerStatus test msg".into(), "NotifyTest", "-");
         }
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<NotifyOutcome> {
         if matches!(e, Event::Custom) && !dispatch.suppressed_rule_ids.is_empty() {
             warn!(
                 "webhook notifier suppressed unstructured custom event rules={:?} host={}",
                 dispatch.suppressed_rule_ids, stat.name
             );
-            return Ok(());
+            return Ok(NotifyOutcome::Skipped { reason: "suppressed" });
         }
+        let mut queued = false;
+        let mut enabled_receivers = 0;
         for (idx, r) in self.config.receiver.iter().enumerate() {
             if !r.enabled {
                 continue;
             }
+            enabled_receivers += 1;
 
             let mut scope = Scope::new();
             scope.push("event", get_tag(e));
             scope.push("host", to_dynamic(stat)?);
             scope.push("config", to_dynamic(r)?);
+            scope.push("alerts", to_dynamic(self.alerts)?);
+            scope.push("recoveries", to_dynamic(&dispatch.recovered)?);
             scope.push("ip_info", to_dynamic(stat.ip_info.as_ref())?);
             scope.push("sys_info", to_dynamic(stat.sys_info.as_ref())?);
 
@@ -162,11 +176,21 @@ impl crate::notifier::Notifier for Webhook {
             // [notify, json_body/content]
             if let Ok(v) = from_dynamic::<Array>(&res) {
                 if v.len() >= 2 && from_dynamic::<bool>(&v[0]).unwrap_or_default() {
-                    self.call_webhook(r, serde_json::to_string(&v[1]).unwrap_or_default());
+                    info!("alert delivery attempt notifier=webhook event={e:?} host={} receiver={idx}", stat.name);
+                    self.call_webhook(r, serde_json::to_string(&v[1]).unwrap_or_default(), get_tag(e), &stat.name);
+                    queued = true;
                 }
             }
         }
 
-        Ok(())
+        if queued {
+            Ok(NotifyOutcome::Queued)
+        } else if enabled_receivers == 0 {
+            info!("alert delivery skipped notifier=webhook event={e:?} host={} reason=no_enabled_receiver", stat.name);
+            Ok(NotifyOutcome::Skipped { reason: "no_enabled_receiver" })
+        } else {
+            info!("alert delivery skipped notifier=webhook event={e:?} host={} reason=script_filtered", stat.name);
+            Ok(NotifyOutcome::Skipped { reason: "script_filtered" })
+        }
     }
 }

@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::alerts::AlertManager;
 use crate::config::{Host, HostGroup};
 use crate::history::HistoryService;
-use crate::notifier::{AlertDispatch, Event, Notifier};
+use crate::notifier::{AlertDispatch, Event, Notifier, NotifyOutcome};
 use crate::payload::{HostStat, StatsResp};
 
 const SAVE_INTERVAL: u64 = 60;
@@ -447,25 +447,57 @@ impl StatsMgr {
                             }
                         }
 
-                        // client notify — Arc::clone is O(1), no HostStat copy
+                        // Client notify — Arc::clone is O(1), no HostStat copy.
+                        // A resource recovery is a distinct event from the
+                        // regular Custom event, so a recovery notification is
+                        // emitted once even though the metric is no longer
+                        // above its trigger threshold.
                         if let Some(event) = notify_event {
-                            let mut dispatch = AlertDispatch::default();
-                            let should_send = if matches!(event, Event::Custom) {
+                            let mut deliveries = Vec::new();
+                            if matches!(&event, Event::Custom) {
                                 match alert_manager.as_mut() {
                                     Some(manager) => {
                                         let evaluation = manager.evaluate_custom(stat, now);
-                                        dispatch.suppressed_rule_ids = evaluation.suppressed_rule_ids;
-                                        evaluation.should_send
+                                        if !evaluation.recovered.is_empty() {
+                                            deliveries.push((
+                                                Event::AlertRecovered,
+                                                AlertDispatch {
+                                                    recovered: evaluation.recovered,
+                                                    ..AlertDispatch::default()
+                                                },
+                                            ));
+                                        }
+                                        if evaluation.should_send {
+                                            deliveries.push((
+                                                Event::Custom,
+                                                AlertDispatch {
+                                                    suppressed_rule_ids: evaluation.suppressed_rule_ids,
+                                                    ..AlertDispatch::default()
+                                                },
+                                            ));
+                                        }
                                     }
-                                    None => true,
+                                    None => deliveries.push((event, AlertDispatch::default())),
                                 }
                             } else {
-                                true
-                            };
-                            if should_send {
-                                if let Err(error) = notifier_tx.send((event, Arc::clone(stat), dispatch)) {
-                                    error!("alert event queue failed host={} error={error}", stat.name);
+                                deliveries.push((event, AlertDispatch::default()));
+                            }
+                            for (delivery_event, dispatch) in deliveries {
+                                info!(
+                                    "alert event detected event={delivery_event:?} host={} gid={}",
+                                    stat.name,
+                                    stat.gid
+                                );
+                                if let Err(error) = notifier_tx.send((delivery_event.clone(), Arc::clone(stat), dispatch)) {
+                                    error!(
+                                        "alert delivery queue_failed event={delivery_event:?} host={} error={error}",
+                                        stat.name
+                                    );
                                 } else {
+                                    info!(
+                                        "alert delivery queue=accepted event={delivery_event:?} host={}",
+                                        stat.name
+                                    );
                                     any_notified = true;
                                 }
                             }
@@ -521,10 +553,19 @@ impl StatsMgr {
                 for n in notify_list {
                     trace!("{} notify {:?} => {:?}", n.kind(), e, stat);
                     match n.notify(&e, &stat, &dispatch) {
-                        Ok(()) => {
+                        Ok(NotifyOutcome::Queued) => {
                             if cfg.alerts.log_delivery {
                                 info!(
-                                    "alert delivery queued notifier={} event={e:?} host={}",
+                                    "alert delivery accepted notifier={} event={e:?} host={} status=queued",
+                                    n.kind(),
+                                    stat.name
+                                );
+                            }
+                        }
+                        Ok(NotifyOutcome::Skipped { reason }) => {
+                            if cfg.alerts.log_delivery {
+                                info!(
+                                    "alert delivery skipped notifier={} event={e:?} host={} reason={reason}",
                                     n.kind(),
                                     stat.name
                                 );

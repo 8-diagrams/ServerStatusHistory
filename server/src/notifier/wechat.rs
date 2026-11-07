@@ -9,12 +9,16 @@ use std::collections::HashMap;
 use tokio::time::Duration;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, select_custom_content, AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E4%B8%BB%E5%8A%A8%E8%B0%83%E7%94%A8
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E5%8F%91%E9%80%81%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E
 static TOKEN_URL: &str = "https://qyapi.weixin.qq.com/cgi-bin/gettoken";
 const KIND: &str = "wechat";
+
+fn default_recovery_tpl() -> String {
+    "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复，当前 {{recovery.value_percent | round}}%，恢复阈值 {{recovery.recover_threshold}}%{% endfor %}".to_string()
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
@@ -26,22 +30,27 @@ pub struct Config {
     pub online_tpl: String,
     pub offline_tpl: String,
     pub custom_tpl: String,
+    #[serde(default = "default_recovery_tpl")]
+    pub recovery_tpl: String,
 }
 
 pub struct WeChat {
     config: &'static Config,
+    alerts: &'static crate::config::AlertsConfig,
     http_client: reqwest::Client,
 }
 
 impl WeChat {
-    pub fn new(cfg: &'static Config) -> Self {
+    pub fn new(cfg: &'static Config, alerts: &'static crate::config::AlertsConfig) -> Self {
         let o = Self {
             config: cfg,
+            alerts,
             http_client: reqwest::Client::new(),
         };
         add_template(KIND, get_tag(&Event::NodeUp), o.config.online_tpl.clone());
         add_template(KIND, get_tag(&Event::NodeDown), o.config.offline_tpl.clone());
         add_template(KIND, get_tag(&Event::Custom), o.config.custom_tpl.clone());
+        add_template(KIND, get_tag(&Event::AlertRecovered), o.config.recovery_tpl.clone());
 
         o
     }
@@ -53,6 +62,10 @@ impl crate::notifier::Notifier for WeChat {
     }
 
     fn send_notify(&self, text_content: String) -> Result<()> {
+        self.send_notify_with_context(text_content, "NotifyTest", "-")
+    }
+
+    fn send_notify_with_context(&self, text_content: String, event: &str, host: &str) -> Result<()> {
         // get access_token
         let mut data = HashMap::new();
         data.insert("corpid", self.config.corp_id.clone());
@@ -61,6 +74,8 @@ impl crate::notifier::Notifier for WeChat {
         let http_client = self.http_client.clone();
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
         let agent_id = self.config.agent_id.clone();
+        let event = event.to_string();
+        let host = host.to_string();
         handle.spawn(async move {
             match http_client
                 .post(TOKEN_URL)
@@ -70,7 +85,8 @@ impl crate::notifier::Notifier for WeChat {
                 .await
             {
                 Ok(resp) => {
-                    info!("wechat get access token resp => {resp:?}");
+                    let status = resp.status();
+                    info!("alert delivery token_response notifier=wechat event={} host={} status={status}", event, host);
                     let json_res = resp.json::<HashMap<String, serde_json::Value>>().await;
                     if let Ok(json_data) = json_res {
                         if let Some(access_token) = json_data.get("access_token") {
@@ -95,10 +111,10 @@ impl crate::notifier::Notifier for WeChat {
                                     .await
                                 {
                                     Ok(resp) => {
-                                        info!("wechat send msg resp => {resp:?}");
+                                        info!("alert delivery sent notifier=wechat event={} host={} status={}", event, host, resp.status());
                                     }
                                     Err(err) => {
-                                        error!("wechat send msg error => {err:?}");
+                                        error!("alert delivery failed notifier=wechat event={} host={} error={err}", event, host);
                                     }
                                 }
                             }
@@ -106,7 +122,7 @@ impl crate::notifier::Notifier for WeChat {
                     }
                 }
                 Err(err) => {
-                    error!("wechat get access_token error => {err:?}");
+                    error!("alert delivery failed notifier=wechat event={} host={} stage=access_token error={err}", event, host);
                 }
             }
         });
@@ -114,29 +130,29 @@ impl crate::notifier::Notifier for WeChat {
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
-        render_template(
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<NotifyOutcome> {
+        let content = render_template(
             self.kind(),
             get_tag(e),
-            context!(host => stat, config => self.config, ip_info => stat.ip_info, sys_info => stat.sys_info),
+            context!(host => stat, config => self.config, alerts => self.alerts, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info),
             true,
-        )
-        .map(|content| match *e {
-            Event::NodeUp | Event::NodeDown => self.send_notify(content).unwrap(),
-            Event::Custom => {
-                let content = select_custom_content(
-                    &content,
-                    dispatch.allowed_rule_ids.as_deref(),
-                    &dispatch.suppressed_rule_ids,
-                );
-                info!("render.custom.tpl => {content}");
-                if !content.is_empty() {
-                    self.send_notify(format!("{}\n{}", self.config.title, content))
-                        .unwrap_or_else(|err| {
-                            error!("send_msg err => {err:?}");
-                        });
-                }
-            }
-        })
+        )?;
+        let content = if matches!(e, Event::Custom) {
+            select_custom_content(
+                &content,
+                dispatch.allowed_rule_ids.as_deref(),
+                &dispatch.suppressed_rule_ids,
+            )
+        } else {
+            content
+        };
+        info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, content.is_empty());
+        if content.is_empty() {
+            info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);
+            return Ok(NotifyOutcome::Skipped { reason: "empty_template" });
+        }
+        info!("alert delivery attempt notifier={} event={e:?} host={} gid={}", self.kind(), stat.name, stat.gid);
+        self.send_notify_with_context(format!("{}\n{}", self.config.title, content), get_tag(e), &stat.name)?;
+        Ok(NotifyOutcome::Queued)
     }
 }

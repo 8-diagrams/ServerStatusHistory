@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::notifier;
@@ -564,11 +565,13 @@ fn log_alert_config_sources(raw: Option<&toml::Value>, alerts: &AlertsConfig) {
         log::info!("config preset selected section=alerts key=log_suppressed value=true source=default reason=missing");
         log::info!("config preset selected section=alerts key=log_delivery value=true source=default reason=missing");
         log::info!("config preset selected section=alerts key=offline_log value=true source=default reason=missing");
+        log::info!("config preset selected section=alerts key=disk_usage.enabled value=true source=default reason=missing");
         log::info!(
             "config preset selected section=alerts key=disk_usage.threshold value={} source=default reason=missing",
             alerts.disk_usage.threshold
         );
         log::info!("config preset selected section=alerts key=disk_usage.recover_threshold value={} source=default reason=missing", alerts.disk_usage.recover_threshold);
+        log::info!("config preset selected section=alerts key=memory_usage.enabled value=true source=default reason=missing");
         log::info!(
             "config preset selected section=alerts key=memory_usage.threshold value={} source=default reason=missing",
             alerts.memory_usage.threshold
@@ -603,12 +606,20 @@ fn log_alert_config_sources(raw: Option<&toml::Value>, alerts: &AlertsConfig) {
             log::info!("config preset selected section=alerts key={key} value={value} source=default reason=missing");
         }
     }
-    if !table.contains_key("disk_usage") {
-        log::info!("config preset selected section=alerts key=disk_usage source=default reason=missing");
-    }
-    if !table.contains_key("memory_usage") {
-        log::info!("config preset selected section=alerts key=memory_usage source=default reason=missing");
-    }
+    log_alert_metric_sources(
+        table,
+        "disk_usage",
+        alerts.disk_usage.enabled,
+        alerts.disk_usage.threshold,
+        alerts.disk_usage.recover_threshold,
+    );
+    log_alert_metric_sources(
+        table,
+        "memory_usage",
+        alerts.memory_usage.enabled,
+        alerts.memory_usage.threshold,
+        alerts.memory_usage.recover_threshold,
+    );
     if !table.contains_key("convergence_rules") && !table.contains_key("convergence") {
         log::info!("config preset selected section=alerts key=convergence_rules source=default reason=missing");
     }
@@ -618,6 +629,28 @@ fn log_alert_config_sources(raw: Option<&toml::Value>, alerts: &AlertsConfig) {
         alerts.state_path,
         alerts.convergence_rules.len()
     );
+}
+
+fn log_alert_metric_sources(
+    alerts_table: &toml::map::Map<String, toml::Value>,
+    section: &str,
+    enabled: bool,
+    threshold: f64,
+    recover_threshold: f64,
+) {
+    let metric_table = alerts_table.get(section).and_then(toml::Value::as_table);
+    let fields = [
+        ("enabled", enabled.to_string()),
+        ("threshold", threshold.to_string()),
+        ("recover_threshold", recover_threshold.to_string()),
+    ];
+    for (key, value) in fields {
+        if metric_table.is_none_or(|table| !table.contains_key(key)) {
+            log::info!(
+                "config preset selected section=alerts key={section}.{key} value={value} source=default reason=missing"
+            );
+        }
+    }
 }
 
 fn log_custom_template_mapping(config: &Config) {
@@ -686,6 +719,291 @@ pub fn test_from_file(cfg: &str) -> Result<Config> {
         .map(|contents| toml::from_str::<Config>(&contents))
         .unwrap()
         .map_err(anyhow::Error::new)
+}
+
+#[derive(Debug)]
+pub struct MigrationReport {
+    pub message: String,
+    pub backup: Option<PathBuf>,
+}
+
+pub fn migrate_file(input: &str, output: Option<&str>, dry_run: bool, force: bool) -> Result<MigrationReport> {
+    let input_path = Path::new(input);
+    let original = fs::read_to_string(input_path)
+        .map_err(|error| anyhow::anyhow!("read config {}: {error}", input_path.display()))?;
+    toml::from_str::<toml::Value>(&original)
+        .map_err(|error| anyhow::anyhow!("invalid TOML in {}: {error}", input_path.display()))?;
+    let (migrated, changes) = migrate_config_text(&original);
+    toml::from_str::<toml::Value>(&migrated)
+        .map_err(|error| anyhow::anyhow!("generated migrated TOML is invalid: {error}"))?;
+
+    let destination = output.map(PathBuf::from).unwrap_or_else(|| input_path.to_path_buf());
+    if destination.exists() && destination != input_path && !force && !dry_run {
+        anyhow::bail!("output {} already exists; pass --force to replace it", destination.display());
+    }
+    if dry_run {
+        eprintln!("--- migrated config preview ---\n{migrated}--- end preview ---");
+        return Ok(MigrationReport { message: format!("migration preview complete; changes={changes}"), backup: None });
+    }
+
+    let backup = backup_path(input_path);
+    fs::copy(input_path, &backup).map_err(|error| {
+        anyhow::anyhow!("backup config {} -> {} failed: {error}", input_path.display(), backup.display())
+    })?;
+    if destination != input_path || migrated != original {
+        atomic_write(&destination, migrated.as_bytes())?;
+    }
+    Ok(MigrationReport {
+        message: if migrated == original { "configuration already uses the current alert format; changes=0".to_string() } else { format!("configuration migrated successfully; changes={changes}") },
+        backup: Some(backup),
+    })
+}
+
+fn backup_path(input: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let base = PathBuf::from(format!("{}.bak.{stamp}", input.display()));
+    if !base.exists() {
+        return base;
+    }
+    for suffix in 1_u32.. {
+        let candidate = PathBuf::from(format!("{}.bak.{stamp}.{suffix}", input.display()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("backup suffix range exhausted")
+}
+
+fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("config.toml");
+    let temporary = parent.join(format!(".{file_name}.migrate.tmp.{}", std::process::id()));
+    fs::write(&temporary, content).map_err(|error| anyhow::anyhow!("write temporary config {} failed: {error}", temporary.display()))?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(anyhow::anyhow!("replace config {} failed: {error}", path.display()));
+    }
+    Ok(())
+}
+
+fn migrate_config_text(original: &str) -> (String, usize) {
+    let mut text = original.to_string();
+    let mut changes = 0;
+    if !has_table(&text, "alerts") {
+        let block = "# Alert configuration migrated by stat_server config migrate.\n[alerts]\nenabled = true\nstate_path = \"data/alerts.db\"\nlog_suppressed = true\nlog_delivery = true\noffline_log = true\n\n[alerts.disk_usage]\nenabled = true\nthreshold = 80.0\nrecover_threshold = 75.0\n\n[alerts.memory_usage]\nenabled = true\nthreshold = 80.0\nrecover_threshold = 75.0\n\n[[alerts.convergence_rules]]\nid = \"resource-default\"\nalert_types = [\"disk_usage_high\", \"memory_usage_high\"]\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"5m\"\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"10m\"\n\n[[alerts.convergence_rules.windows]]\ninterval = \"60m\"\n\n";
+        let insert_at = text.find("[tgbot]").or_else(|| text.find("[wechat]")).or_else(|| text.find("[email]")).unwrap_or(text.len());
+        text.insert_str(insert_at, block);
+        changes += 1;
+    } else {
+        let (updated, root_changes) = migrate_alert_root_fields(&text);
+        text = updated;
+        changes += root_changes;
+
+        let (updated, disk_changes) = migrate_alert_metric_section(&text, "disk_usage", "disk");
+        text = updated;
+        changes += disk_changes;
+        let (updated, memory_changes) = migrate_alert_metric_section(&text, "memory_usage", "memory");
+        text = updated;
+        changes += memory_changes;
+    }
+    if !text.contains("[[alerts.convergence_rules]]") {
+        text.push_str("\n# Alert convergence rule added by stat_server config migrate.\n[[alerts.convergence_rules]]\nid = \"resource-default\"\nalert_types = [\"disk_usage_high\", \"memory_usage_high\"]\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"5m\"\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"10m\"\n\n[[alerts.convergence_rules.windows]]\ninterval = \"60m\"\n");
+        changes += 1;
+    }
+    for (kind, field) in [("memory", "memory_usage"), ("disk", "disk_usage")] {
+        let before = text.clone();
+        text = migrate_templates(&text, kind, field);
+        if text != before { changes += 1; }
+    }
+    let before = text.clone();
+    text = migrate_recovery_templates(&text);
+    if text != before { changes += 1; }
+    (text, changes)
+}
+
+fn migrate_recovery_templates(content: &str) -> String {
+    let recovery = "{% for recovery in recoveries %}✅ {{host.name}} {{recovery.alert_type}} 已恢复，当前 {{recovery.value_percent | round}}%，恢复阈值 {{recovery.recover_threshold}}%{% endfor %}";
+    let sections = ["tgbot", "wechat", "email"];
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(lines.len() + sections.len());
+    let mut current_section = false;
+    let mut has_recovery = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if current_section && !has_recovery {
+                output.push(format!("recovery_tpl = \"{recovery}\""));
+            }
+            current_section = trimmed == "[tgbot]" || trimmed == "[wechat]" || trimmed == "[email]";
+            has_recovery = false;
+        }
+        if current_section && trimmed.starts_with("recovery_tpl") {
+            has_recovery = true;
+        }
+        output.push(line.to_string());
+    }
+    if current_section && !has_recovery {
+        output.push(format!("recovery_tpl = \"{recovery}\""));
+    }
+    let mut result = output.join("\n");
+    if content.ends_with('\n') { result.push('\n'); }
+    result
+}
+
+fn migrate_alert_root_fields(content: &str) -> (String, usize) {
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(root_index) = lines.iter().position(|line| line.trim() == "[alerts]") else {
+        // A dotted table such as [alerts.disk_usage] creates the parent table
+        // implicitly. Insert an explicit parent section before it so root
+        // defaults do not accidentally become children of a nested section.
+        let Some(nested_index) = lines.iter().position(|line| line.trim().starts_with("[alerts.")) else {
+            return (content.to_string(), 0);
+        };
+        let block = "[alerts]\nenabled = true\nstate_path = \"data/alerts.db\"\nlog_suppressed = true\nlog_delivery = true\noffline_log = true\n\n";
+        let mut output = lines[..nested_index].join("\n");
+        if !output.is_empty() { output.push('\n'); }
+        output.push_str(block);
+        output.push_str(&lines[nested_index..].join("\n"));
+        if content.ends_with('\n') { output.push('\n'); }
+        return (output, 1);
+    };
+
+    let end = lines[root_index + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|offset| root_index + 1 + offset)
+        .unwrap_or(lines.len());
+    let keys = lines[root_index + 1..end]
+        .iter()
+        .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+        .collect::<HashSet<_>>();
+    let defaults = [
+        ("enabled", "true"),
+        ("state_path", "\"data/alerts.db\""),
+        ("log_suppressed", "true"),
+        ("log_delivery", "true"),
+        ("offline_log", "true"),
+    ];
+    let missing = defaults
+        .iter()
+        .filter(|(key, _)| !keys.contains(key))
+        .map(|(key, value)| format!("{key} = {value}"))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return (content.to_string(), 0);
+    }
+    let mut updated = lines[..end].join("\n");
+    if !updated.ends_with('\n') { updated.push('\n'); }
+    updated.push_str(&missing.join("\n"));
+    updated.push('\n');
+    updated.push_str(&lines[end..].join("\n"));
+    if content.ends_with('\n') && !updated.ends_with('\n') { updated.push('\n'); }
+    (updated, missing.len())
+}
+
+fn migrate_alert_metric_section(content: &str, section: &str, kind: &str) -> (String, usize) {
+    let header = format!("[alerts.{section}]");
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(start) = lines.iter().position(|line| line.trim() == header) else {
+        let defaults = metric_section_defaults(section);
+        let insertion = format!("\n{defaults}\n");
+        let mut updated = content.trim_end_matches('\n').to_string();
+        updated.push_str(&insertion);
+        if content.ends_with('\n') { updated.push('\n'); }
+        return (updated, 1);
+    };
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(lines.len());
+    let keys = lines[start + 1..end]
+        .iter()
+        .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+        .collect::<HashSet<_>>();
+    let defaults = metric_defaults(section, kind);
+    let missing = defaults
+        .iter()
+        .filter(|(key, _)| !keys.contains(key))
+        .map(|(key, value)| format!("{key} = {value}"))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return (content.to_string(), 0);
+    }
+    let mut updated = lines[..end].join("\n");
+    if !updated.ends_with('\n') { updated.push('\n'); }
+    updated.push_str(&missing.join("\n"));
+    updated.push('\n');
+    updated.push_str(&lines[end..].join("\n"));
+    if content.ends_with('\n') && !updated.ends_with('\n') { updated.push('\n'); }
+    (updated, missing.len())
+}
+
+fn metric_defaults(section: &str, kind: &str) -> Vec<(&'static str, &'static str)> {
+    match kind {
+        "disk" => vec![("enabled", "true"), ("threshold", "80.0"), ("recover_threshold", "75.0")],
+        "memory" => vec![("enabled", "true"), ("threshold", "80.0"), ("recover_threshold", "75.0")],
+        _ => unreachable!("unsupported alert metric section {section}"),
+    }
+}
+
+fn metric_section_defaults(section: &str) -> String {
+    let kind = if section == "disk_usage" { "disk" } else { "memory" };
+    let mut output = format!("[alerts.{section}]\n");
+    for (key, value) in metric_defaults(section, kind) {
+        output.push_str(&format!("{key} = {value}\n"));
+    }
+    output.trim_end().to_string()
+}
+
+fn has_table(content: &str, name: &str) -> bool {
+    let header = format!("[{name}]");
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == header || trimmed.starts_with(format!("[{name}.").as_str()) || trimmed.starts_with(format!("[[{name}.").as_str())
+    })
+}
+
+fn migrate_templates(content: &str, kind: &str, field: &str) -> String {
+    let mut output = Vec::new();
+    let mut active = false;
+    let alert_type = match kind {
+        "memory" => "memory_usage_high",
+        "disk" => "disk_usage_high",
+        _ => field,
+    };
+    let start_marker = format!("<!-- ss-alert:{alert_type} -->");
+    let lines = content.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let is_condition = trimmed.starts_with("{% if") && trimmed.contains("host.") && trimmed.contains(field_prefix(kind)) && !trimmed.contains("ss-alert:");
+        if is_condition {
+            let indentation = &line[..line.len() - line.trim_start().len()];
+            let normalized = match kind {
+                "memory" => format!("{indentation}{{% if alerts.memory_usage.enabled and host.memory_total > 0 and (host.memory_used * 100.0 / host.memory_total) >= alerts.memory_usage.threshold %}}"),
+                "disk" => format!("{indentation}{{% if alerts.disk_usage.enabled and host.hdd_total > 0 and (host.hdd_used * 100.0 / host.hdd_total) >= alerts.disk_usage.threshold %}}"),
+                _ => line.to_string(),
+            };
+            output.push(normalized);
+            if lines.get(index + 1).is_none_or(|next| !next.trim().starts_with("<!-- ss-alert:")) {
+                output.push(start_marker.clone());
+                active = true;
+            }
+        } else if active && trimmed == "{% endif %}" {
+            output.push("<!-- /ss-alert -->".to_string());
+            output.push(line.to_string());
+            active = false;
+        } else {
+            output.push(line.to_string());
+        }
+    }
+    let mut result = output.join("\n");
+    if content.ends_with('\n') { result.push('\n'); }
+    result
+}
+
+fn field_prefix(kind: &str) -> &'static str {
+    match kind { "memory" => "memory_", "disk" => "hdd_", _ => "" }
 }
 
 #[cfg(test)]
@@ -789,5 +1107,76 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.alerts.convergence_rules[0].alert_types.len(), 2);
         assert_eq!(cfg.alerts.convergence_rules[0].windows[0].interval, "2m");
+    }
+
+    #[test]
+    fn migrate_old_alert_config_adds_complete_defaults_and_is_idempotent() {
+        let old = r#"
+http_addr = "0.0.0.0:8080"
+
+[alerts]
+enabled = false
+
+[tgbot]
+enabled = false
+custom_tpl = """
+{% if host.hdd_used / host.hdd_total > 0.8 %}
+disk is high
+{% endif %}
+"""
+"#;
+        let (migrated, changes) = migrate_config_text(old);
+        assert!(changes > 0);
+        let value = toml::from_str::<toml::Value>(&migrated).unwrap();
+        let alerts = value.get("alerts").unwrap().as_table().unwrap();
+        assert_eq!(alerts.get("enabled").and_then(toml::Value::as_bool), Some(false));
+        assert_eq!(alerts.get("state_path").and_then(toml::Value::as_str), Some("data/alerts.db"));
+        assert!(alerts.get("convergence_rules").is_some());
+        assert!(migrated.contains("recovery_tpl ="));
+        let disk = alerts.get("disk_usage").unwrap().as_table().unwrap();
+        assert_eq!(disk.get("threshold").and_then(toml::Value::as_float), Some(80.0));
+        assert!(migrated.contains("alerts.disk_usage.threshold"));
+        assert!(migrated.contains("<!-- ss-alert:disk_usage_high -->"));
+
+        let (again, second_changes) = migrate_config_text(&migrated);
+        assert_eq!(again, migrated);
+        assert_eq!(second_changes, 0);
+    }
+
+    #[test]
+    fn migrate_file_creates_backup_and_replaces_input_atomically() {
+        let unique = format!(
+            "server-status-config-migrate-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let path = std::env::temp_dir().join(format!("{unique}.toml"));
+        let original = "[tgbot]\nenabled = false\ncustom_tpl = \"\"\"\n{% if host.hdd_used / host.hdd_total > 0.8 %}\ndisk\n{% endif %}\n\"\"\"\n";
+        fs::write(&path, original).unwrap();
+        let report = migrate_file(path.to_str().unwrap(), None, false, false).unwrap();
+        let backup = report.backup.unwrap();
+        assert!(backup.exists());
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let migrated = fs::read_to_string(&path).unwrap();
+        assert!(migrated.contains("[alerts]"));
+        assert!(toml::from_str::<toml::Value>(&migrated).is_ok());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(backup).unwrap();
+    }
+
+    #[test]
+    fn migrate_dry_run_does_not_create_backup_or_modify_input() {
+        let unique = format!(
+            "server-status-config-dry-run-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let path = std::env::temp_dir().join(format!("{unique}.toml"));
+        let original = "[tgbot]\nenabled = false\n";
+        fs::write(&path, original).unwrap();
+        let report = migrate_file(path.to_str().unwrap(), None, true, false).unwrap();
+        assert!(report.backup.is_none());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
     }
 }
