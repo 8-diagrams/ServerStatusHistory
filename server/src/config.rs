@@ -576,8 +576,20 @@ impl Config {
 }
 
 pub fn from_str(content: &str) -> Option<Config> {
-    let raw = toml::from_str::<toml::Value>(content).ok();
-    let mut o = toml::from_str::<Config>(content).unwrap();
+    let raw = match toml::from_str::<toml::Value>(content) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            log::error!("config parse failed: {error}");
+            return None;
+        }
+    };
+    let mut o = match toml::from_str::<Config>(content) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!("config decode failed: {error}");
+            return None;
+        }
+    };
     o.alerts.normalize();
     o.hosts_map = HashMap::new();
 
@@ -823,10 +835,10 @@ pub fn from_file(cfg: &str) -> Option<Config> {
 }
 
 pub fn test_from_file(cfg: &str) -> Result<Config> {
-    fs::read_to_string(cfg)
-        .map(|contents| toml::from_str::<Config>(&contents))
-        .unwrap()
-        .map_err(anyhow::Error::new)
+    let contents = fs::read_to_string(cfg)
+        .map_err(|error| anyhow::anyhow!("read config {cfg} failed: {error}"))?;
+    toml::from_str::<Config>(&contents)
+        .map_err(|error| anyhow::anyhow!("parse config {cfg} failed: {error}"))
 }
 
 #[derive(Debug)]

@@ -147,7 +147,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // config test
     if args.config_test {
-        config::test_from_file(&args.config).unwrap();
+        if let Err(error) = config::test_from_file(&args.config) {
+            eprintln!("❌ config test failed: {error:#}");
+            process::exit(1);
+        }
         eprintln!("✨ the conf file {} syntax is ok", &args.config);
         eprintln!("✨ the conf file {} test is successful", &args.config);
         process::exit(0);
