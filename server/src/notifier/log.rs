@@ -1,6 +1,7 @@
 #![deny(warnings)]
 use anyhow::Result;
 use chrono::Local;
+use log::warn;
 use minijinja::context;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -9,7 +10,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
 
 const KIND: &str = "log";
 
@@ -82,7 +83,14 @@ impl crate::notifier::Notifier for Log {
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
+        if matches!(e, Event::Custom) && !dispatch.suppressed_rule_ids.is_empty() {
+            warn!(
+                "log notifier suppressed unstructured custom event rules={:?} host={}",
+                dispatch.suppressed_rule_ids, stat.name
+            );
+            return Ok(());
+        }
         render_template(
             self.kind(),
             "tpl",

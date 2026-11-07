@@ -10,7 +10,7 @@ use minijinja::context;
 use serde::{Deserialize, Serialize};
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, select_custom_content, AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
 
 const KIND: &str = "email";
 
@@ -92,7 +92,7 @@ impl crate::notifier::Notifier for Email {
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
         render_template(
             self.kind(),
             get_tag(e),
@@ -102,6 +102,11 @@ impl crate::notifier::Notifier for Email {
         .map(|content| match *e {
             Event::NodeUp | Event::NodeDown => self.send_notify(content).unwrap(),
             Event::Custom => {
+                let content = select_custom_content(
+                    &content,
+                    dispatch.allowed_rule_ids.as_deref(),
+                    &dispatch.suppressed_rule_ids,
+                );
                 info!("render.custom.tpl => {content}");
                 if !content.is_empty() {
                     self.send_notify(format!("{}\n{}", self.config.title, content))

@@ -15,9 +15,10 @@ use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::alerts::AlertManager;
 use crate::config::{Host, HostGroup};
 use crate::history::HistoryService;
-use crate::notifier::{Event, Notifier};
+use crate::notifier::{AlertDispatch, Event, Notifier};
 use crate::payload::{HostStat, StatsResp};
 
 const SAVE_INTERVAL: u64 = 60;
@@ -181,6 +182,7 @@ impl StatsMgr {
         let (stat_tx, stat_rx) = sync_channel(512);
         STAT_SENDER.set(stat_tx).unwrap();
         let (notifier_tx, notifier_rx) = sync_channel(512);
+        let alert_manager = cfg.alerts.enabled.then(|| AlertManager::new(&cfg.alerts));
 
         // Fixed hosts are part of the server configuration, not ephemeral
         // Agent sessions. Seed them as offline so they remain visible even if
@@ -309,7 +311,16 @@ impl StatsMgr {
                             }
                             if notify_up {
                                 // node up notify
-                                notifier_tx.send((Event::NodeUp, Arc::clone(&arc_stat)));
+                                if let Err(error) = notifier_tx.send((
+                                    Event::NodeUp,
+                                    Arc::clone(&arc_stat),
+                                    AlertDispatch::default(),
+                                )) {
+                                    error!(
+                                        "alert event queue failed event=NodeUp host={} error={error}",
+                                        arc_stat.name
+                                    );
+                                }
                             }
                             host_stat_map.insert(arc_stat.name.clone(), arc_stat);
                             //trace!("{:?}", host_stat_map);
@@ -327,6 +338,7 @@ impl StatsMgr {
             let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
             let history = self.history.clone();
+            let mut alert_manager = alert_manager;
             let mut latest_notify_ts = 0_u64;
             let mut latest_save_ts = 0_u64;
             let mut latest_group_gc = 0_u64;
@@ -365,8 +377,21 @@ impl StatsMgr {
                         let notify_event = {
                             let o = Arc::make_mut(stat);
                             // 30s 下线
+                            let previous_latest_ts = o.latest_ts;
                             if o.latest_ts + cfg.offline_threshold < now {
                                 became_offline = o.online4 || o.online6;
+                                if became_offline && cfg.alerts.offline_log {
+                                    info!(
+                                        "offline candidate host={} gid={} last_received_at={} gap_seconds={} offline_threshold={} online4={} online6={}",
+                                        o.name,
+                                        o.gid,
+                                        previous_latest_ts,
+                                        now.saturating_sub(previous_latest_ts),
+                                        cfg.offline_threshold,
+                                        o.online4,
+                                        o.online6
+                                    );
+                                }
                                 o.online4 = false;
                                 o.online6 = false;
                             }
@@ -394,6 +419,16 @@ impl StatsMgr {
                                     Some(Event::Custom)
                                 } else {
                                     o.disabled = true;
+                                    if cfg.alerts.offline_log {
+                                        info!(
+                                            "node down host={} gid={} last_received_at={} gap_seconds={} offline_threshold={}",
+                                            o.name,
+                                            o.gid,
+                                            previous_latest_ts,
+                                            now.saturating_sub(previous_latest_ts),
+                                            cfg.offline_threshold
+                                        );
+                                    }
                                     Some(Event::NodeDown)
                                 }
                             } else {
@@ -414,8 +449,26 @@ impl StatsMgr {
 
                         // client notify — Arc::clone is O(1), no HostStat copy
                         if let Some(event) = notify_event {
-                            notifier_tx.send((event, Arc::clone(stat)));
-                            any_notified = true;
+                            let mut dispatch = AlertDispatch::default();
+                            let should_send = if matches!(event, Event::Custom) {
+                                match alert_manager.as_mut() {
+                                    Some(manager) => {
+                                        let evaluation = manager.evaluate_custom(stat, now);
+                                        dispatch.suppressed_rule_ids = evaluation.suppressed_rule_ids;
+                                        evaluation.should_send
+                                    }
+                                    None => true,
+                                }
+                            } else {
+                                true
+                            };
+                            if should_send {
+                                if let Err(error) = notifier_tx.send((event, Arc::clone(stat), dispatch)) {
+                                    error!("alert event queue failed host={} error={error}", stat.name);
+                                } else {
+                                    any_notified = true;
+                                }
+                            }
                         }
 
                         resp.servers.push(Arc::clone(stat));
@@ -462,12 +515,29 @@ impl StatsMgr {
         // notify thread
         thread::spawn(move || loop {
             while let Ok(msg) = notifier_rx.recv() {
-                let (e, stat) = msg;
+                let (e, stat, dispatch) = msg;
                 let notify_list = &*notifies.lock().unwrap();
                 trace!("recv notify => {e:?}, {stat:?}");
                 for n in notify_list {
                     trace!("{} notify {:?} => {:?}", n.kind(), e, stat);
-                    n.notify(&e, &stat);
+                    match n.notify(&e, &stat, &dispatch) {
+                        Ok(()) => {
+                            if cfg.alerts.log_delivery {
+                                info!(
+                                    "alert delivery queued notifier={} event={e:?} host={}",
+                                    n.kind(),
+                                    stat.name
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            error!(
+                                "alert delivery failed notifier={} event={e:?} host={} error={error:#}",
+                                n.kind(),
+                                stat.name
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -513,10 +583,13 @@ impl StatsMgr {
         match serde_json::from_value(data) {
             Ok(stat) => {
                 trace!("send stat => {stat:?} ");
-                SENDER.send(Cow::Owned(stat));
+                SENDER
+                    .send(Cow::Owned(stat))
+                    .map_err(|error| anyhow::anyhow!("stat queue is unavailable: {error}"))?;
             }
             Err(err) => {
                 error!("report error => {err:?}");
+                anyhow::bail!("invalid report payload: {err}");
             }
         }
         Ok(())

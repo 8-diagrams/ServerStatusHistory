@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use tokio::time::Duration;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, select_custom_content, AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
 
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E4%B8%BB%E5%8A%A8%E8%B0%83%E7%94%A8
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E5%8F%91%E9%80%81%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E
@@ -114,7 +114,7 @@ impl crate::notifier::Notifier for WeChat {
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
         render_template(
             self.kind(),
             get_tag(e),
@@ -124,6 +124,11 @@ impl crate::notifier::Notifier for WeChat {
         .map(|content| match *e {
             Event::NodeUp | Event::NodeDown => self.send_notify(content).unwrap(),
             Event::Custom => {
+                let content = select_custom_content(
+                    &content,
+                    dispatch.allowed_rule_ids.as_deref(),
+                    &dispatch.suppressed_rule_ids,
+                );
                 info!("render.custom.tpl => {content}");
                 if !content.is_empty() {
                     self.send_notify(format!("{}\n{}", self.config.title, content))

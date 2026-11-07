@@ -30,18 +30,21 @@
 | `NodeDown` | 服务端判定主机从在线变为离线 | 掉线通知 |
 | `Custom` | 主机仍在线，周期性执行自定义规则 | 内存、磁盘等指标阈值 |
 
-这不是一个带告警状态库的完整规则引擎：当前没有告警等级、确认（ack）、静默窗口、升级策略或持久化告警实例。`Custom` 规则由模板或 Webhook 脚本自行决定是否输出内容。
+这不是一个带告警等级、确认（ack）、静默窗口和升级策略的完整规则引擎。第一版已为磁盘占用告警增加 SQLite 收敛状态；其他 `Custom` 规则仍由模板或 Webhook 脚本自行决定是否输出内容。
 
 ## 2. 事件触发逻辑
 
 ### 2.1 上线和掉线
 
 - `offline_threshold` 是无上报多久后判定离线，默认 `30` 秒，服务端会把小于 `30` 的值强制改为 `30`。
+- 每次成功进入服务端统计队列后，服务端用自己的接收时间写入 `Host.latest_ts`；因此离线判断依赖“服务端最后收到数据的时间”，不依赖 Agent 携带的事件时间。
+- 定时线程每 500ms 检查：当 `now > latest_ts + offline_threshold` 时，将 IPv4/IPv6 在线状态置为离线。机器只有从在线状态变为离线时才产生一次 `offline candidate` 日志，日志包含 `last_received_at`、`gap_seconds`、`offline_threshold`、`online4` 和 `online6`；实际生成 `NodeDown` 时还会输出 `node down` 日志。
 - 主机从在线状态变为离线时产生一次 `NodeDown`。
 - 离线后再次收到上报，如果上一次服务端记录与本次上报的时间间隔超过 `offline_threshold`，产生一次 `NodeUp`。
 - 发送 `NodeDown` 后，运行时主机状态会标记为已处理，避免每个定时周期重复发送；下一次有效上报会重新恢复运行状态。
 - 事件使用服务端记录的最后上报时间进行状态判断；Agent 的事件时间主要用于历史数据，不能用来绕过服务端的离线判断。
-- 固定主机即使离线仍保留在主机列表中；动态 `hosts_group` 主机仍受 `group_gc` 清理策略影响。
+- 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error` 并返回 `400`；有效旧 Agent 的请求格式不变。
+- 固定主机启动时会预先出现在列表中，即使离线也会保留；尚未成功上报的固定主机不会伪造一次 `NodeDown`。动态 `hosts_group` 主机则受 `group_gc` 清理策略影响。
 
 ### 2.2 自定义规则
 
@@ -310,7 +313,148 @@ ping_10010, ping_189, ping_10086
 {% endif %}
 ```
 
-## 6. 推荐设置方案
+## 6. 旧版 `config.toml` 的兼容与默认值来源
+
+告警功能升级必须兼容现有线上配置。旧配置通常没有 `[alerts]`、`[[alerts.rules]]` 或收敛策略段；这类配置不能因为缺少新字段而启动失败。新版加载流程应遵循以下优先级：
+
+```text
+显式配置值 > 合法化后的显式值 > 系统预设值
+```
+
+旧配置缺少新字段时自动采用系统预设值；显式配置但超出允许范围时，使用修正后的安全值，并记录 `adjusted` 日志。Agent 的 HTTP/gRPC 上报协议不变，Agent 无需升级。
+
+### 6.1 告警默认预设
+
+下面的预设值用于没有对应配置项的旧版 `config.toml`。它们应集中定义在 Rust 配置模块中，不能在通知器或 `StatsMgr` 内分别写一套默认值。
+
+| 配置路径 | 预设值 | 作用 |
+| --- | --- | --- |
+| `alerts.enabled` | `true` | 保留旧版告警能力；主机和通知器自身的 `notify/enabled` 仍然有效 |
+| `alerts.state_path` | `data/alerts.db` | 保存告警指纹、发送次数和收敛状态；相对路径按服务端工作目录解析 |
+| `alerts.log_suppressed` | `true` | 记录被收敛的告警，但采用“首次抑制 + 下次发送汇总”策略，避免每 30 秒刷屏 |
+| `alerts.log_delivery` | `true` | 记录发送成功、发送失败和队列投递失败 |
+| `alerts.offline_log` | `true` | 记录离线候选、最后接收时间、间隔秒数和离线阈值 |
+| `alerts.convergence_rules[0].windows[0]` | `max_notifications = 3`, `interval = "5m"` | 第 1～3 次实际发送的告警，5 分钟内最多发送一次 |
+| `alerts.convergence_rules[0].windows[1]` | `max_notifications = 3`, `interval = "10m"` | 第 4～6 次实际发送的告警，10 分钟内最多发送一次 |
+| `alerts.convergence_rules[0].windows[2]` | `interval = "60m"` | 第 7 次及以后，60 分钟内最多发送一次 |
+| `alerts.disk_usage.recover_threshold` | `75%` | 默认磁盘告警阈值为 80% 时，降至 75% 才恢复，避免临界值抖动 |
+| `alerts.memory_usage.threshold` / `recover_threshold` | `80%` / `75%` | 内存告警的默认触发和恢复阈值；与磁盘共享默认收敛规则，但状态独立 |
+
+收敛次数按“实际发送次数”计数，不按后台每轮检查次数计数。告警恢复后清零；服务端重启后从 `state_path` 恢复。`notify_interval` 仍然是事件检查周期，不能被解释为上述收敛时间。
+
+收敛规则独立于告警类型定义。一个规则可以通过 `alert_types` 绑定多个告警项目，`*` 表示匹配未被更具体规则覆盖的项目：
+
+```toml
+[[alerts.convergence_rules]]
+id = "resource-default"
+alert_types = ["disk_usage_high", "memory_usage_high"]
+
+[[alerts.convergence_rules.windows]]
+max_notifications = 3
+interval = "5m"
+
+[[alerts.convergence_rules.windows]]
+max_notifications = 3
+interval = "10m"
+
+[[alerts.convergence_rules.windows]]
+interval = "60m"
+```
+
+同一个告警类型优先使用第一个精确匹配规则；没有精确匹配时才使用 `*` 规则。告警状态指纹包含规则 ID、告警类型、主机和目录，因此同一规则下的不同主机或不同告警类型不会互相计数。
+
+### 6.2 `custom_tpl` 的精确匹配
+
+Jinja 的自由文本输出本身没有告警 ID，服务端不能可靠地从“硬盘使用率超过 80%”这类自然语言中反推它属于哪条规则。因此新版采用显式标记块，标记中的 ID 必须与 `alerts.convergence_rules[].alert_types` 中的值一致：
+
+```jinja
+{% if host.hdd_total > 0 and host.hdd_used / host.hdd_total > 0.8 %}
+<!-- ss-alert:disk_usage_high -->
+<pre>{{ host.name }} 硬盘使用率超过 80%</pre>
+<!-- /ss-alert -->
+{% endif %}
+
+{% if host.memory_total > 0 and host.memory_used / host.memory_total > 0.8 %}
+<!-- ss-alert:memory_usage_high -->
+<pre>{{ host.name }} 内存使用率超过 80%</pre>
+<!-- /ss-alert -->
+{% endif %}
+```
+
+服务端先按指标计算收敛状态，再把被收敛的规则 ID 传给通知器。通知器渲染模板后只移除对应标记块，其他告警块仍可发送。例如磁盘告警被抑制而内存告警未被抑制时，只移除 `disk_usage_high` 块，不会丢弃内存消息。
+
+旧的未标记 `custom_tpl` 仍可以启动和发送，启动时会输出 `custom template is unclassified` 警告；当需要抑制其中某一条告警时，因为无法安全拆分，服务端会保守地抑制整段旧模板。要获得精确收敛，必须给每个分支加上上述标记。服务端不会按文案、正则或模板渲染结果猜测规则 ID，避免误匹配。
+
+目前标记解析已接入 Telegram、企业微信和邮件的 `custom_tpl`；Webhook 使用 Rhai 脚本自行决定发送内容，建议在脚本中显式使用同样的告警 ID，并由后续结构化规则接入统一收敛器。
+
+旧模板未加标记时，磁盘分支仍使用磁盘告警的状态指纹，但无法做到同一模板内部的独立收敛；迁移到标记块后，状态指纹使用 `rule_id:<alert_type>:<host>:<gid>`，使不同告警互不影响。
+
+### 6.3 必须输出的配置来源日志
+
+服务端启动时应输出一条不含敏感值的配置摘要，并对每一个新增告警配置标记来源：
+
+```text
+INFO config preset selected section=alerts key=enabled value=true source=default reason=missing
+INFO config preset selected section=alerts key=convergence_rules[0].windows[0].interval value=5m source=default reason=missing
+INFO config preset selected section=alerts key=state_path value=data/alerts.db source=default reason=missing
+INFO config effective section=alerts enabled=true state_path=data/alerts.db convergence_rules=1
+```
+
+建议的来源枚举为：
+
+- `explicit`：配置文件中明确写出且通过校验；
+- `default`：字段缺失，采用系统预设；
+- `adjusted`：字段存在但被限制到安全范围，例如小于最小间隔；
+- `generated`：运行时生成，例如空的 `jwt_secret` 或 `admin_pass`。
+
+日志中不得输出密码、JWT secret、Bot token、SMTP password、Webhook basic-auth password 等原文，只输出 `configured`、`generated` 或 `redacted`。当前 `config::from_str` 会打印 `admin_pass`，新版应移除该行为并改为：
+
+```text
+WARN config generated key=admin_pass source=generated value=redacted
+WARN config generated key=jwt_secret source=generated value=redacted
+```
+
+配置加载失败仍应直接失败并给出字段路径；“字段缺失”不是错误。未知字段为了兼容旧版本不应阻止启动，但应输出：
+
+```text
+WARN config unknown_key path=alerts.old_option action=ignored
+```
+
+`config inspect` 工具则应把这些信息转换为报告，展示原始值（敏感字段脱敏）、有效值、来源和警告，而不是只做 TOML 语法检查。
+
+### 6.4 加载实现建议
+
+不要让 `#[serde(default)]` 成为唯一的可观察来源。建议保留现有 `Config` 结构用于业务代码，同时增加一个统一加载入口：
+
+```rust
+pub struct ConfigLoadReport {
+    pub config: Config,
+    pub fields: Vec<ConfigFieldState>,
+    pub warnings: Vec<ConfigWarning>,
+}
+```
+
+加载入口先将 TOML 解析为 `toml::Value` 记录字段是否出现，再反序列化为 `Config`，统一执行默认值、范围修正、路径解析和敏感值脱敏。现有 `from_file`、`from_env` 和 `--cloud` 都调用同一个入口；`from_str` 可保留为兼容包装器。这样线上旧配置、环境变量配置和审计工具会得到完全一致的最终生效结果。
+
+配置报告建议支持：
+
+```bash
+./stat_server config inspect -c /opt/ServerStatus/config.toml
+./stat_server config inspect -c /opt/ServerStatus/config.toml --format json --redact
+./stat_server config diff -c /opt/ServerStatus/config.toml --reference ./config.toml
+```
+
+退出码建议为 `0=有效`、`1=存在错误`、`2=有效但有警告`。审计命令必须使用与服务启动相同的加载逻辑，不能另写一套默认值。
+
+### 6.5 升级与回滚行为
+
+1. 直接替换新版二进制并使用旧 `config.toml`，服务端应正常启动。
+2. 启动日志明确显示 `[alerts]` 缺失，因此选择了哪些预设；不要求用户立即修改配置。
+3. 用户只需要在需要覆盖时增加 `[alerts]` 或对应规则；未覆盖的字段继续使用预设。
+4. 回滚到旧二进制时，新版新增的 TOML 段可能被旧版忽略，因此部署文档应提示：若需要回滚，先保留一份旧格式配置，避免把新版专用段带回旧程序。
+5. 告警状态库是可选的：若路径不可写，应记录明确错误。第一版可降级为内存状态并给出 `WARN`，但必须说明重启会丢失收敛计数；生产环境建议将 `data/alerts.db` 放在可持久化目录并纳入备份。
+
+## 7. 推荐设置方案
 
 ### 仅监控上下线
 
@@ -325,7 +469,16 @@ ping_10010, ping_189, ping_10086
 - CPU：`cpu / 100`
 - Swap：`swap_used / swap_total`
 
-建议先配置 80% 或 90% 阈值，并保留总量大于 0 的保护条件。由于当前 Custom 告警按间隔重复发送，建议把 `notify_interval` 设为 300 秒或更长，避免持续高负载时刷屏。
+磁盘告警第一版可直接配置：
+
+```toml
+[alerts.disk_usage]
+enabled = true
+threshold = 80.0
+recover_threshold = 75.0
+```
+
+磁盘占用达到 `threshold` 后，服务端在产生 `Custom` 事件前按 `alerts.convergence_rules` 收敛；降到 `recover_threshold` 或更低时清除状态。其他尚未结构化的自由格式 `Custom` 告警仍受 `notify_interval` 影响，建议为这类规则配置合适的检查周期。
 
 ### 只记录不推送
 
@@ -335,7 +488,7 @@ ping_10010, ping_189, ping_10086
 
 同时将多个顶层适配器设为 `enabled = true`；同一事件会广播到所有已启用适配器。Webhook 可以配置多个 receiver，每个 receiver 可有不同脚本和目标。
 
-## 7. 排查清单
+## 8. 排查清单
 
 1. 先执行 `./stat_server -c config.toml -t`，确认 TOML 语法。
 2. 再执行 `./stat_server -c config.toml --notify-test`，确认凭据、网络和目标地址。
@@ -347,10 +500,11 @@ ping_10010, ping_189, ping_10086
 8. 邮件检查 SMTP 是否允许 STARTTLS，以及 `to` 中的地址格式。
 9. 日志通知检查 `log_dir` 权限，并用 logrotate 管理文件大小和保留时间。
 
-## 8. 当前实现边界和后续可改进点
+## 9. 当前实现边界和后续可改进点
 
 - `notify_interval` 是全局节流，尚未做到按主机、按规则、按渠道独立限流。
-- `Custom` 没有告警状态持久化，因此服务端重启后不会知道之前是否已经告警。
+- 磁盘占用告警已经按规则、主机和目录持久化收敛状态；其他尚未结构化的 `Custom` 告警仍没有独立的阈值边沿状态。
+- 未标记的自由格式 `custom_tpl` 无法把最终渲染内容反向映射为具体告警类型，因此在磁盘告警收敛时会保守地整体抑制；使用 `ss-alert` 标记块后，服务端只移除对应告警块，其他告警可以继续发送。
 - 没有恢复事件对应的自定义规则状态；只有主机上下线恢复（`NodeUp`）。
 - Webhook 是同步构建脚本、异步发送 HTTP；没有重试、签名、失败队列或持久化投递记录。
 - 企业微信每次发送都重新取 token，没有 token 缓存。

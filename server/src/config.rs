@@ -56,6 +56,189 @@ fn default_history_compression() -> String {
     "latest".to_string()
 }
 
+fn default_alerts_state_path() -> String {
+    "data/alerts.db".to_string()
+}
+
+fn default_alerts_true() -> bool {
+    true
+}
+
+fn default_disk_alert_threshold() -> f64 {
+    80.0
+}
+
+fn default_disk_alert_recover_threshold() -> f64 {
+    75.0
+}
+
+fn default_memory_alert_threshold() -> f64 {
+    80.0
+}
+
+fn default_memory_alert_recover_threshold() -> f64 {
+    75.0
+}
+
+fn default_alert_convergence() -> Vec<AlertConvergenceWindow> {
+    vec![
+        AlertConvergenceWindow {
+            max_notifications: Some(3),
+            interval: "5m".to_string(),
+        },
+        AlertConvergenceWindow {
+            max_notifications: Some(3),
+            interval: "10m".to_string(),
+        },
+        AlertConvergenceWindow {
+            max_notifications: None,
+            interval: "60m".to_string(),
+        },
+    ]
+}
+
+fn default_alert_convergence_rules() -> Vec<AlertConvergenceRule> {
+    vec![AlertConvergenceRule {
+        id: "resource-default".to_string(),
+        alert_types: vec!["disk_usage_high".to_string(), "memory_usage_high".to_string()],
+        windows: default_alert_convergence(),
+    }]
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlertConvergenceWindow {
+    /// Maximum number of notifications in this stage. `None` means unlimited.
+    #[serde(default)]
+    pub max_notifications: Option<u32>,
+    /// Duration such as `5m`, `10m` or `60m`.
+    pub interval: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlertConvergenceRule {
+    pub id: String,
+    /// Alert identifiers to which this rule applies. `*` applies to all
+    /// alert identifiers that do not have a more specific rule.
+    #[serde(default)]
+    pub alert_types: Vec<String>,
+    #[serde(default = "default_alert_convergence")]
+    pub windows: Vec<AlertConvergenceWindow>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiskUsageAlertConfig {
+    #[serde(default = "default_alerts_true")]
+    pub enabled: bool,
+    #[serde(default = "default_disk_alert_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_disk_alert_recover_threshold")]
+    pub recover_threshold: f64,
+}
+
+impl Default for DiskUsageAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: default_disk_alert_threshold(),
+            recover_threshold: default_disk_alert_recover_threshold(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryUsageAlertConfig {
+    #[serde(default = "default_alerts_true")]
+    pub enabled: bool,
+    #[serde(default = "default_memory_alert_threshold")]
+    pub threshold: f64,
+    #[serde(default = "default_memory_alert_recover_threshold")]
+    pub recover_threshold: f64,
+}
+
+impl Default for MemoryUsageAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: default_memory_alert_threshold(),
+            recover_threshold: default_memory_alert_recover_threshold(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlertsConfig {
+    #[serde(default = "default_alerts_true")]
+    pub enabled: bool,
+    #[serde(default = "default_alerts_state_path")]
+    pub state_path: String,
+    #[serde(default = "default_alerts_true")]
+    pub log_suppressed: bool,
+    #[serde(default = "default_alerts_true")]
+    pub log_delivery: bool,
+    #[serde(default = "default_alerts_true")]
+    pub offline_log: bool,
+    #[serde(default)]
+    pub disk_usage: DiskUsageAlertConfig,
+    #[serde(default)]
+    pub memory_usage: MemoryUsageAlertConfig,
+    #[serde(default = "default_alert_convergence")]
+    pub convergence: Vec<AlertConvergenceWindow>,
+    #[serde(default)]
+    pub convergence_rules: Vec<AlertConvergenceRule>,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            state_path: default_alerts_state_path(),
+            log_suppressed: true,
+            log_delivery: true,
+            offline_log: true,
+            disk_usage: DiskUsageAlertConfig::default(),
+            memory_usage: MemoryUsageAlertConfig::default(),
+            convergence: default_alert_convergence(),
+            convergence_rules: default_alert_convergence_rules(),
+        }
+    }
+}
+
+impl AlertsConfig {
+    pub fn normalize(&mut self) {
+        if self.convergence.is_empty() {
+            self.convergence = default_alert_convergence();
+        }
+        if self.convergence_rules.is_empty() {
+            self.convergence_rules = vec![AlertConvergenceRule {
+                id: "resource-default".to_string(),
+                alert_types: vec!["disk_usage_high".to_string(), "memory_usage_high".to_string()],
+                windows: self.convergence.clone(),
+            }];
+        }
+        for rule in &mut self.convergence_rules {
+            if rule.id.trim().is_empty() {
+                rule.id = "unnamed".to_string();
+            }
+            if rule.windows.is_empty() {
+                rule.windows = default_alert_convergence();
+            }
+            for alert_type in &mut rule.alert_types {
+                *alert_type = alert_type.trim().to_ascii_lowercase();
+            }
+        }
+        self.disk_usage.threshold = self.disk_usage.threshold.clamp(0.0, 100.0);
+        self.disk_usage.recover_threshold = self.disk_usage.recover_threshold.clamp(0.0, 100.0);
+        if self.disk_usage.recover_threshold > self.disk_usage.threshold {
+            self.disk_usage.recover_threshold = self.disk_usage.threshold;
+        }
+        self.memory_usage.threshold = self.memory_usage.threshold.clamp(0.0, 100.0);
+        self.memory_usage.recover_threshold = self.memory_usage.recover_threshold.clamp(0.0, 100.0);
+        if self.memory_usage.recover_threshold > self.memory_usage.threshold {
+            self.memory_usage.recover_threshold = self.memory_usage.threshold;
+        }
+    }
+}
+
 fn default_history_tiers() -> Vec<HistoryTierConfig> {
     [
         ("1s", "15m"),
@@ -230,6 +413,8 @@ pub struct Config {
     pub tls_dir: String,
     #[serde(default)]
     pub history: HistoryConfig,
+    #[serde(default)]
+    pub alerts: AlertsConfig,
     // admin user & pass
     pub admin_user: Option<String>,
     pub admin_pass: Option<String>,
@@ -296,8 +481,13 @@ impl Config {
 }
 
 pub fn from_str(content: &str) -> Option<Config> {
+    let raw = toml::from_str::<toml::Value>(content).ok();
     let mut o = toml::from_str::<Config>(content).unwrap();
+    o.alerts.normalize();
     o.hosts_map = HashMap::new();
+
+    log_alert_config_sources(raw.as_ref(), &o.alerts);
+    log_custom_template_mapping(&o);
 
     for (idx, host) in o.hosts.iter_mut().enumerate() {
         normalize_tags(&mut host.tags);
@@ -339,10 +529,134 @@ pub fn from_str(content: &str) -> Option<Config> {
         o.jwt_secret = Some(Uuid::new_v4().to_string());
     }
 
-    eprintln!("✨ admin_user: {}", o.admin_user.as_ref()?);
-    eprintln!("✨ admin_pass: {}", o.admin_pass.as_ref()?);
+    if content
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.get("admin_pass").cloned())
+        .and_then(|value| value.as_str().map(str::is_empty))
+        .unwrap_or(true)
+    {
+        log::warn!("config generated key=admin_pass source=generated value=redacted");
+    }
+    if content
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|value| value.get("jwt_secret").cloned())
+        .and_then(|value| value.as_str().map(str::is_empty))
+        .unwrap_or(true)
+    {
+        log::warn!("config generated key=jwt_secret source=generated value=redacted");
+    }
 
     Some(o)
+}
+
+fn log_alert_config_sources(raw: Option<&toml::Value>, alerts: &AlertsConfig) {
+    let Some(alerts_value) = raw.and_then(|value| value.get("alerts")) else {
+        log::info!(
+            "config preset selected section=alerts key=enabled value={} source=default reason=missing",
+            alerts.enabled
+        );
+        log::info!(
+            "config preset selected section=alerts key=state_path value={} source=default reason=missing",
+            alerts.state_path
+        );
+        log::info!("config preset selected section=alerts key=log_suppressed value=true source=default reason=missing");
+        log::info!("config preset selected section=alerts key=log_delivery value=true source=default reason=missing");
+        log::info!("config preset selected section=alerts key=offline_log value=true source=default reason=missing");
+        log::info!(
+            "config preset selected section=alerts key=disk_usage.threshold value={} source=default reason=missing",
+            alerts.disk_usage.threshold
+        );
+        log::info!("config preset selected section=alerts key=disk_usage.recover_threshold value={} source=default reason=missing", alerts.disk_usage.recover_threshold);
+        log::info!(
+            "config preset selected section=alerts key=memory_usage.threshold value={} source=default reason=missing",
+            alerts.memory_usage.threshold
+        );
+        log::info!("config preset selected section=alerts key=memory_usage.recover_threshold value={} source=default reason=missing", alerts.memory_usage.recover_threshold);
+        for (rule_idx, rule) in alerts.convergence_rules.iter().enumerate() {
+            for (window_idx, window) in rule.windows.iter().enumerate() {
+                log::info!("config preset selected section=alerts key=convergence_rules[{rule_idx}].windows[{window_idx}] value={} source=default reason=missing", window.interval);
+            }
+        }
+        log::info!(
+            "config effective section=alerts enabled={} state_path={} convergence_rules={}",
+            alerts.enabled,
+            alerts.state_path,
+            alerts.convergence_rules.len()
+        );
+        return;
+    };
+
+    let Some(table) = alerts_value.as_table() else {
+        log::warn!("config adjusted path=alerts reason=expected_table action=defaults");
+        return;
+    };
+    for (key, value) in [
+        ("enabled", alerts.enabled.to_string()),
+        ("state_path", alerts.state_path.clone()),
+        ("log_suppressed", alerts.log_suppressed.to_string()),
+        ("log_delivery", alerts.log_delivery.to_string()),
+        ("offline_log", alerts.offline_log.to_string()),
+    ] {
+        if !table.contains_key(key) {
+            log::info!("config preset selected section=alerts key={key} value={value} source=default reason=missing");
+        }
+    }
+    if !table.contains_key("disk_usage") {
+        log::info!("config preset selected section=alerts key=disk_usage source=default reason=missing");
+    }
+    if !table.contains_key("memory_usage") {
+        log::info!("config preset selected section=alerts key=memory_usage source=default reason=missing");
+    }
+    if !table.contains_key("convergence_rules") && !table.contains_key("convergence") {
+        log::info!("config preset selected section=alerts key=convergence_rules source=default reason=missing");
+    }
+    log::info!(
+        "config effective section=alerts enabled={} state_path={} convergence_rules={}",
+        alerts.enabled,
+        alerts.state_path,
+        alerts.convergence_rules.len()
+    );
+}
+
+fn log_custom_template_mapping(config: &Config) {
+    let known_rule_types = config
+        .alerts
+        .convergence_rules
+        .iter()
+        .flat_map(|rule| rule.alert_types.iter())
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for (kind, template) in [
+        ("tgbot", &config.tgbot.custom_tpl),
+        ("wechat", &config.wechat.custom_tpl),
+        ("email", &config.email.custom_tpl),
+    ] {
+        if !template.trim().is_empty() && !template.contains("ss-alert:") {
+            log::warn!(
+                "custom template is unclassified notifier={} action=legacy_whole_event; add <!-- ss-alert:<rule_id> --> blocks for exact convergence",
+                kind
+            );
+        }
+        for marker in template.lines().filter_map(parse_alert_marker) {
+            if !known_rule_types.contains(&marker) && !known_rule_types.contains("*") {
+                log::warn!(
+                    "custom template marker has no convergence rule notifier={} alert_type={} action=send_without_convergence",
+                    kind,
+                    marker
+                );
+            }
+        }
+    }
+}
+
+fn parse_alert_marker(line: &str) -> Option<String> {
+    line.trim()
+        .strip_prefix("<!-- ss-alert:")
+        .and_then(|value| value.strip_suffix(" -->"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_tags(tags: &mut Vec<String>) {
@@ -445,5 +759,35 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.hosts[0].gid, "MAILSVR");
         assert_eq!(cfg.hosts_map["mail-1"].gid, "MAILSVR");
+    }
+
+    #[test]
+    fn old_alert_config_gets_default_disk_rule() {
+        let cfg = from_str("").unwrap();
+        assert_eq!(cfg.alerts.convergence_rules.len(), 1);
+        assert_eq!(cfg.alerts.convergence_rules[0].id, "resource-default");
+        assert_eq!(
+            cfg.alerts.convergence_rules[0].alert_types,
+            vec!["disk_usage_high", "memory_usage_high"]
+        );
+        assert_eq!(cfg.alerts.convergence_rules[0].windows[0].interval, "5m");
+    }
+
+    #[test]
+    fn convergence_rule_can_target_multiple_alert_types() {
+        let cfg = from_str(
+            r#"
+                [alerts]
+                [[alerts.convergence_rules]]
+                id = "resource"
+                alert_types = ["disk_usage_high", "memory_usage_high"]
+                [[alerts.convergence_rules.windows]]
+                max_notifications = 1
+                interval = "2m"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.alerts.convergence_rules[0].alert_types.len(), 2);
+        assert_eq!(cfg.alerts.convergence_rules[0].windows[0].interval, "2m");
     }
 }

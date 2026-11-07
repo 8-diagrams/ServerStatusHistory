@@ -25,6 +25,7 @@ use axum::{
 };
 use tower_http::cors::{Any, CorsLayer};
 
+mod alerts;
 mod assets;
 mod auth;
 mod config;

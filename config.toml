@@ -107,6 +107,40 @@ retention = "3y"
 resolution = "1mo"
 retention = "10y"
 
+# 告警收敛。旧配置没有此段时，服务端自动使用同样的系统预设值并在启动日志中说明。
+[alerts]
+enabled = true
+state_path = "data/alerts.db"
+log_suppressed = true
+log_delivery = true
+offline_log = true
+
+[alerts.disk_usage]
+enabled = true
+threshold = 80.0
+recover_threshold = 75.0
+
+[alerts.memory_usage]
+enabled = true
+threshold = 80.0
+recover_threshold = 75.0
+
+# 一个收敛规则可以绑定多个告警类型；当前内置磁盘和内存占用告警。
+[[alerts.convergence_rules]]
+id = "resource-default"
+alert_types = ["disk_usage_high", "memory_usage_high"]
+
+[[alerts.convergence_rules.windows]]
+max_notifications = 3
+interval = "5m"
+
+[[alerts.convergence_rules.windows]]
+max_notifications = 3
+interval = "10m"
+
+[[alerts.convergence_rules.windows]]
+interval = "60m"
+
 # https://core.telegram.org/bots/api
 # https://jinja.palletsprojects.com/en/3.0.x/templates/#if
 [tgbot]
@@ -121,13 +155,18 @@ title = "❗<b>Server Status</b>"
 online_tpl =  "{{config.title}} \n😆 {{host.location}} {{host.name}} 主机恢复上线啦"
 offline_tpl = "{{config.title}} \n😱 {{host.location}} {{host.name}} 主机已经掉线啦"
 # custom 模板置空则停用自定义告警，只保留上下线通知
+# 每个可独立收敛的分支使用 <!-- ss-alert:<rule_id> --> ... <!-- /ss-alert --> 标记。
 custom_tpl = """
 {% if host.memory_used / host.memory_total > 0.5  %}
+<!-- ss-alert:memory_usage_high -->
 <pre>😲 {{host.name}} 主机内存使用率超50%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
+<!-- /ss-alert -->
 {% endif %}
 
 {% if host.hdd_used / host.hdd_total  > 0.5  %}
+<!-- ss-alert:disk_usage_high -->
 <pre>😲 {{host.name}} 主机硬盘使用率超50%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
+<!-- /ss-alert -->
 {% endif %}
 """
 ###################### tgbot end ##########################
@@ -151,11 +190,15 @@ online_tpl  = "{{config.title}} \n😆 {{host.location}} 的 {{host.name}} 主�
 offline_tpl = "{{config.title}} \n😱 {{host.location}} 的 {{host.name}} 主机已经掉线啦"
 custom_tpl = """
 {% if host.memory_used / host.memory_total > 0.8  %}
+<!-- ss-alert:memory_usage_high -->
 😲 {{host.name}} 主机内存使用率超80%
+<!-- /ss-alert -->
 {% endif %}
 
 {% if host.hdd_used / host.hdd_total > 0.8  %}
+<!-- ss-alert:disk_usage_high -->
 😲 {{host.name}} 主机硬盘使用率超80%
+<!-- /ss-alert -->
 {% endif %}
 """
 ###################### wechat end ##########################
@@ -173,11 +216,15 @@ online_tpl  = "{{config.title}} 😆 {{host.location}} 的 {{host.name}} 主机�
 offline_tpl = "{{config.title}} 😱 {{host.location}} 的 {{host.name}} 主机已经掉线啦"
 custom_tpl = """
 {% if host.memory_used / host.memory_total > 0.8  %}
+<!-- ss-alert:memory_usage_high -->
 <pre>😲 {{host.name}} 主机内存使用率超80%, 当前{{ (100 * host.memory_used / host.memory_total) | round }}%  </pre>
+<!-- /ss-alert -->
 {% endif %}
 
 {% if host.hdd_used / host.hdd_total > 0.8  %}
+<!-- ss-alert:disk_usage_high -->
 <pre>😲 {{host.name}} 主机硬盘使用率超80%, 当前{{ (100 * host.hdd_used / host.hdd_total) | round }}% </pre>
+<!-- /ss-alert -->
 {% endif %}
 """
 

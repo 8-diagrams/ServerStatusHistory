@@ -2,6 +2,7 @@
 // #![allow(unused)]
 use anyhow::Result;
 use chrono::Local;
+use log::warn;
 use reqwest;
 use rhai::serde::{from_dynamic, to_dynamic};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::Duration;
 
-use crate::notifier::{get_tag, Event, HostStat, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, AlertDispatch, Event, HostStat, NOTIFIER_HANDLE};
 
 const KIND: &str = "webhook";
 
@@ -134,7 +135,14 @@ impl crate::notifier::Notifier for Webhook {
         Ok(())
     }
 
-    fn notify(&self, e: &Event, stat: &HostStat) -> Result<()> {
+    fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<()> {
+        if matches!(e, Event::Custom) && !dispatch.suppressed_rule_ids.is_empty() {
+            warn!(
+                "webhook notifier suppressed unstructured custom event rules={:?} host={}",
+                dispatch.suppressed_rule_ids, stat.name
+            );
+            return Ok(());
+        }
         for (idx, r) in self.config.receiver.iter().enumerate() {
             if !r.enabled {
                 continue;
