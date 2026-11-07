@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tokio::time::Duration;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, log_message_assembly, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "tgbot";
 
@@ -74,6 +74,14 @@ impl crate::notifier::Notifier for TGBot {
         if self.config.format.trim().eq_ignore_ascii_case("html") {
             data.insert("parse_mode", "HTML".to_string());
         }
+        info!(
+            "alert channel request assembled notifier=tgbot event={} host={} endpoint=sendMessage chat_id_configured={} parse_mode={} body_len={}",
+            event,
+            host,
+            !self.config.chat_id.trim().is_empty(),
+            if data.contains_key("parse_mode") { "HTML" } else { "text" },
+            data.get("text").map_or(0, String::len)
+        );
 
         let tg_url = self.tg_url.clone();
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
@@ -123,6 +131,7 @@ impl crate::notifier::Notifier for TGBot {
                 &dispatch.suppressed_rule_ids,
             );
         }
+        log_message_assembly(self.kind(), e, &self.config.format, &dispatch.route_keys, &message);
         info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, message.body.is_empty());
         if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);

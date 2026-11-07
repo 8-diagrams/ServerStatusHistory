@@ -1,4 +1,5 @@
 use anyhow::Result;
+use ::log::info;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::sync::Mutex;
@@ -61,6 +62,34 @@ pub struct AlertDispatch {
 pub struct NotificationMessage {
     pub title: String,
     pub body: String,
+}
+
+fn log_preview(value: &str) -> String {
+    const LIMIT: usize = 240;
+    let normalized = value.replace(['\n', '\r', '\t'], " ");
+    if normalized.chars().count() <= LIMIT {
+        normalized
+    } else {
+        format!("{}…", normalized.chars().take(LIMIT).collect::<String>())
+    }
+}
+
+pub fn log_message_assembly(
+    notifier: &str,
+    event: &Event,
+    format: &str,
+    route_keys: &[String],
+    message: &NotificationMessage,
+) {
+    info!(
+        "alert content assembled notifier={} event={event:?} format={} route_keys={:?} title={:?} body_len={} body_preview={:?}",
+        notifier,
+        format,
+        route_keys,
+        message.title,
+        message.body.len(),
+        log_preview(&message.body)
+    );
 }
 
 impl NotificationMessage {

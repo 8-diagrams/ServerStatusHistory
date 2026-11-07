@@ -208,6 +208,20 @@ alert delivery accepted notifier=wechat event=AlertRecovered host=node-1 status=
 alert delivery sent notifier=webhook event=AlertRecovered host=node-1 status=200 OK
 ```
 
+完整的通知审计链路还会记录以下阶段（默认 `alerts.log_delivery = true`）：
+
+```text
+alert event detected event=NodeDown host=node-1 gid=MAILSVR route_keys=[node_down]
+alert delivery queue=accepted event=NodeDown host=node-1
+alert channel selected notifier=tgbot event=NodeDown host=node-1 route_keys=["node_down"]
+alert processing notifier=tgbot event=NodeDown host=node-1 firing=0 recoveries=0 suppressed_rules=0
+alert content assembled notifier=tgbot event=NodeDown format=html route_keys=["node_down"] title="主机 node-1 离线告警" body_len=...
+alert channel request assembled notifier=tgbot event=NodeDown host=node-1 endpoint=sendMessage chat_id_configured=true parse_mode=HTML body_len=...
+alert delivery sent notifier=tgbot event=NodeDown host=node-1 status=200 OK
+```
+
+日志中的 `body_preview` 只记录经过换行压缩并限制长度的正文摘要；Telegram chat id、Bot token、企业微信 secret、SMTP 密码、Webhook Basic Auth 等敏感值不会记录。若需要排查完整模板内容，应直接检查配置文件并保护好其权限。
+
 通知目前没有 Web 管理页面或运行时配置 API，只能通过服务端配置加载。普通部署使用 `-c` 指定 TOML；云模式使用 `--cloud`，从环境变量 `SRV_CONF` 读取完整配置：
 
 ```bash

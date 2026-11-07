@@ -10,7 +10,7 @@ use minijinja::context;
 use serde::{Deserialize, Serialize};
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, log_message_assembly, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "email";
 
@@ -72,6 +72,7 @@ impl crate::notifier::Notifier for Email {
         for mailbox in mailboxes.iter() {
             builder = builder.to(mailbox.clone());
         }
+        let body_len = html_content.len();
 
         let body = if self.config.format.trim().eq_ignore_ascii_case("text")
             || self.config.format.trim().eq_ignore_ascii_case("txt")
@@ -84,6 +85,17 @@ impl crate::notifier::Notifier for Email {
                 .body(html_content)
         };
         let email = builder.multipart(MultiPart::alternative().singlepart(body)).unwrap();
+
+        info!(
+            "alert channel request assembled notifier=email event={} host={} smtp_configured={} recipients={} subject={:?} format={} body_len={}",
+            event,
+            host,
+            !self.config.server.trim().is_empty(),
+            self.config.to.split(';').filter(|value| !value.trim().is_empty()).count(),
+            self.config.subject,
+            self.config.format,
+            body_len
+        );
 
         let creds = Credentials::new(self.config.username.clone(), self.config.password.clone());
 
@@ -130,6 +142,7 @@ impl crate::notifier::Notifier for Email {
                 &dispatch.suppressed_rule_ids,
             );
         }
+        log_message_assembly(self.kind(), e, &self.config.format, &dispatch.route_keys, &message);
         info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, message.body.is_empty());
         if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);

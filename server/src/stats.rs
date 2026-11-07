@@ -311,6 +311,11 @@ impl StatsMgr {
                             }
                             if notify_up {
                                 // node up notify
+                                info!(
+                                    "alert event detected event=NodeUp host={} gid={} route_keys=[node_up]",
+                                    arc_stat.name,
+                                    arc_stat.gid
+                                );
                                 if let Err(error) = notifier_tx.send((
                                     Event::NodeUp,
                                     Arc::clone(&arc_stat),
@@ -321,6 +326,11 @@ impl StatsMgr {
                                 )) {
                                     error!(
                                         "alert event queue failed event=NodeUp host={} error={error}",
+                                        arc_stat.name
+                                    );
+                                } else {
+                                    info!(
+                                        "alert delivery queue=accepted event=NodeUp host={}",
                                         arc_stat.name
                                     );
                                 }
@@ -604,6 +614,14 @@ impl StatsMgr {
                     }
                     let mut channel_dispatch = dispatch.clone();
                     channel_dispatch.route_keys = selected_route_keys.clone();
+                    if cfg.alerts.log_delivery {
+                        info!(
+                            "alert channel selected notifier={} event={e:?} host={} route_keys={:?}",
+                            n.kind(),
+                            stat.name,
+                            selected_route_keys
+                        );
+                    }
                     if matches!(e, Event::Custom) && !dispatch.firing.is_empty() {
                         let selected_firing = dispatch
                             .firing
@@ -627,6 +645,16 @@ impl StatsMgr {
                         if channel_dispatch.recovered.is_empty() {
                             continue;
                         }
+                    }
+                    if cfg.alerts.log_delivery {
+                        info!(
+                            "alert processing notifier={} event={e:?} host={} firing={} recoveries={} suppressed_rules={}",
+                            n.kind(),
+                            stat.name,
+                            channel_dispatch.firing.len(),
+                            channel_dispatch.recovered.len(),
+                            channel_dispatch.suppressed_rule_ids.len()
+                        );
                     }
                     trace!("{} notify {:?} => {:?}", n.kind(), e, stat);
                     match n.notify(&e, &stat, &channel_dispatch) {

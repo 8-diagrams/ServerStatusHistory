@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use tokio::time::Duration;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, log_message_assembly, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E4%B8%BB%E5%8A%A8%E8%B0%83%E7%94%A8
 // https://qydev.weixin.qq.com/wiki/index.php?title=%E5%8F%91%E9%80%81%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E
@@ -80,6 +80,13 @@ impl crate::notifier::Notifier for WeChat {
         let agent_id = self.config.agent_id.clone();
         let event = event.to_string();
         let host = host.to_string();
+        info!(
+            "alert channel request assembled notifier=wechat event={} host={} stages=gettoken+message agent_id_configured={} body_len={}",
+            event,
+            host,
+            !agent_id.trim().is_empty(),
+            text_content.len()
+        );
         handle.spawn(async move {
             match http_client
                 .post(TOKEN_URL)
@@ -152,6 +159,7 @@ impl crate::notifier::Notifier for WeChat {
                 &dispatch.suppressed_rule_ids,
             );
         }
+        log_message_assembly(self.kind(), e, &self.config.format, &dispatch.route_keys, &message);
         info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, message.body.is_empty());
         if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);

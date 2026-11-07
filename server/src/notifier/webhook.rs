@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::Duration;
 
-use crate::notifier::{get_tag, render_notification_message, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, log_message_assembly, render_notification_message, AlertDispatch, Event, HostStat, NotificationMessage, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "webhook";
 
@@ -101,6 +101,17 @@ impl Webhook {
         let http_client = self.http_client.clone();
         let event = event.to_string();
         let host = host.to_string();
+        info!(
+            "alert channel request assembled notifier=webhook event={} host={} url_configured={} headers={} basic_auth={} timeout_seconds={} body_len={}",
+            event,
+            host,
+            !r.url.trim().is_empty(),
+            r.headers.len(),
+            r.username.as_deref().is_some_and(|value| !value.is_empty())
+                && r.password.as_deref().is_some_and(|value| !value.is_empty()),
+            r.timeout,
+            content.len()
+        );
         handle.spawn(async move {
             let mut http_client_builder = http_client
                 .post(&r.url)
@@ -198,6 +209,7 @@ impl crate::notifier::Notifier for Webhook {
                 "body": body,
             }).to_string())
         };
+        log_message_assembly(self.kind(), e, &self.config.format, &dispatch.route_keys, &structured_message);
 
         for (idx, r) in self.config.receiver.iter().enumerate() {
             if !r.enabled {
@@ -231,7 +243,10 @@ impl crate::notifier::Notifier for Webhook {
             if let Ok(v) = from_dynamic::<Array>(&res) {
                 if v.len() >= 2 && from_dynamic::<bool>(&v[0]).unwrap_or_default() {
                     info!("alert delivery attempt notifier=webhook event={e:?} host={} receiver={idx}", stat.name);
-                    self.call_webhook(r, serde_json::to_string(&v[1]).unwrap_or_default(), get_tag(e), &stat.name);
+                    let body = serde_json::to_string(&v[1]).unwrap_or_default();
+                    let legacy_message = NotificationMessage::new(&self.config.title, &body);
+                    log_message_assembly(self.kind(), e, "rhai", &dispatch.route_keys, &legacy_message);
+                    self.call_webhook(r, body, get_tag(e), &stat.name);
                     queued = true;
                 }
             }

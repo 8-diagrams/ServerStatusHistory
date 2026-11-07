@@ -10,7 +10,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{render_notification_message, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{log_message_assembly, render_notification_message, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "log";
 
@@ -66,6 +66,14 @@ impl crate::notifier::Notifier for Log {
         let event = event.to_string();
         let host = host.to_string();
 
+        info!(
+            "alert channel request assembled notifier=log event={} host={} file={} body_len={}",
+            event,
+            host,
+            log_file,
+            content.len()
+        );
+
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
         handle.spawn(async move {
             //
@@ -115,6 +123,7 @@ impl crate::notifier::Notifier for Log {
             fallback_body,
             context,
         )?;
+        log_message_assembly(self.kind(), e, &self.config.format, &dispatch.route_keys, &message);
         if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);
             return Ok(NotifyOutcome::Skipped { reason: "empty_template" });
