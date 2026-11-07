@@ -104,6 +104,7 @@ impl NotificationMessage {
         match (self.title.trim(), self.body.trim()) {
             ("", body) => body.to_string(),
             (title, "") => title.to_string(),
+            (title, body) if body == title || body.starts_with(&format!("{title}\n")) => body.to_string(),
             (title, body) => format!("{title}\n{body}"),
         }
     }
@@ -459,5 +460,7 @@ mod tests {
         assert_eq!(message.title, "ServerStatus");
         assert_eq!(message.body, "主机已离线");
         assert_eq!(message.text(), "ServerStatus\n主机已离线");
+        let legacy = NotificationMessage::new("ServerStatus", "ServerStatus\n主机已离线");
+        assert_eq!(legacy.text(), "ServerStatus\n主机已离线");
     }
 }

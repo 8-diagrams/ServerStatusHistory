@@ -221,8 +221,11 @@ Type=simple
 User=root
 Group=root
 Environment="RUST_BACKTRACE=1"
+Environment="RUST_LOG=info"
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/stat_server -c $INSTALL_DIR/config.toml
+StandardOutput=journal
+StandardError=journal
 Restart=on-failure
 RestartSec=3
 

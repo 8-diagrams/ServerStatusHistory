@@ -136,7 +136,11 @@ pub async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    pretty_env_logger::init();
+    let mut logger = pretty_env_logger::formatted_builder();
+    if std::env::var_os("RUST_LOG").is_none() {
+        logger.filter_level(log::LevelFilter::Info);
+    }
+    logger.init();
     let args = Args::parse();
 
     eprintln!("✨ {} {}", env!("CARGO_BIN_NAME"), env!("APP_VERSION"));
@@ -207,6 +211,13 @@ async fn main() -> Result<(), anyhow::Error> {
         let o = Box::new(notifier::webhook::Webhook::new(&cfg.webhook, &cfg.alerts));
         notifies.lock().unwrap().push(o);
     }
+    let enabled_notifiers = notifies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|notifier| notifier.kind())
+        .collect::<Vec<_>>();
+    info!("alert notifier channels enabled={enabled_notifiers:?}");
     // init notifier end
 
     // notify test

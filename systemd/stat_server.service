@@ -6,8 +6,11 @@ After=network.target
 #User=nobody
 #Group=nobody
 Environment="RUST_BACKTRACE=1"
+Environment="RUST_LOG=info"
 WorkingDirectory=/opt/ServerStatus
 ExecStart=/opt/ServerStatus/stat_server -c /opt/ServerStatus/config.toml
+StandardOutput=journal
+StandardError=journal
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 

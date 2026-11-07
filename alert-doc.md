@@ -42,6 +42,7 @@
 - 定时线程每 500ms 检查：当 `now > latest_ts + offline_threshold` 时，将 IPv4/IPv6 在线状态置为离线。机器只有从在线状态变为离线时才产生一次 `offline candidate` 日志，日志包含 `last_received_at`、`gap_seconds`、`offline_threshold`、`online4` 和 `online6`；实际生成 `NodeDown` 时还会输出 `node down` 日志。
 - 主机从在线状态变为离线时产生一次 `NodeDown`。
 - 离线后再次收到上报，如果上一次服务端记录与本次上报的时间间隔超过 `offline_threshold`，产生一次 `NodeUp`。
+- Agent 进程重启本身不是 `NodeUp` 事件；如果重启期间的上报间隔没有超过 `offline_threshold`，服务端会继续按在线主机处理，只会产生普通的 `Custom` 检查事件。
 - 发送 `NodeDown` 后，运行时主机状态会标记为已处理，避免每个定时周期重复发送；下一次有效上报会重新恢复运行状态。
 - 事件使用服务端记录的最后上报时间进行状态判断；Agent 的事件时间主要用于历史数据，不能用来绕过服务端的离线判断。
 - 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error` 并返回 `400`；有效旧 Agent 的请求格式不变。
@@ -714,6 +715,38 @@ journalctl -u serverstatus -f -o cat \
 ```
 
 注意：`accepted/queued` 表示服务端已把任务交给异步通道，不等同于对端业务确认；是否真正完成，要继续观察同一 `notifier` 的 `sent` 或 `failed` 日志。Telegram、企业微信、Webhook 会记录 HTTP 状态，邮件记录 SMTP 成功或失败，文件日志记录写入文件路径。
+
+使用 systemd 部署时，服务端标准输出和错误输出默认进入 journald。推荐使用：
+
+```bash
+# 持续查看服务端日志
+journalctl -u stat_server -f -o cat
+
+# 查看最近一小时的事件和通知链路
+journalctl -u stat_server --since "1 hour ago" -o cat \\
+  | grep -E 'offline candidate|node down|alert event detected|alert processing|alert channel selected|alert content assembled|alert channel request assembled|alert delivery'
+
+# 只看某台主机
+journalctl -u stat_server -f -o cat \\
+  | grep -E 'host=node-1|host="node-1"'
+```
+
+仓库中的 [systemd/stat_server.service](systemd/stat_server.service) 已设置 `RUST_LOG=info`、`StandardOutput=journal` 和 `StandardError=journal`。安装或修改 unit 文件后执行：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart stat_server
+sudo systemctl status stat_server
+```
+
+如果只想临时提高日志级别，可以停止 systemd 服务后前台运行：
+
+```bash
+RUST_LOG=debug /opt/ServerStatus/stat_server \\
+  --config /opt/ServerStatus/config.toml
+```
+
+`[log]` 通知器是另一类输出：它把事件模板内容写到 `log_dir/ssr.log.YYYY-MM-DD`，不能替代 journald 中的服务端处理链路日志。建议同时保留 journald，便于判断事件是否产生、路由是否命中以及通道发送是否成功。
 
 ## 9. 当前实现边界和后续可改进点
 

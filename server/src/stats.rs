@@ -296,6 +296,28 @@ impl StatsMgr {
                                     stat_t.ip_info = pre_stat.ip_info.clone();
                                 }
 
+                                let previous_latest_ts = pre_stat.latest_ts;
+                                let report_gap = stat_t.latest_ts.saturating_sub(previous_latest_ts);
+                                let crossed_offline_threshold = should_notify_up(
+                                    previous_latest_ts,
+                                    stat_t.latest_ts,
+                                    true,
+                                    cfg.offline_threshold,
+                                );
+                                if crossed_offline_threshold {
+                                    info!(
+                                        "node up candidate host={} previous_latest_ts={} received_at={} gap_seconds={} offline_threshold={} notify={} previous_online4={} previous_online6={} decision={}",
+                                        stat_t.name,
+                                        previous_latest_ts,
+                                        stat_t.latest_ts,
+                                        report_gap,
+                                        cfg.offline_threshold,
+                                        stat_t.notify,
+                                        pre_stat.online4,
+                                        pre_stat.online6,
+                                        if stat_t.notify { "send" } else { "suppressed_notify_disabled" }
+                                    );
+                                }
                                 if should_notify_up(
                                     pre_stat.latest_ts,
                                     stat_t.latest_ts,
@@ -599,6 +621,16 @@ impl StatsMgr {
                 let (e, stat, dispatch) = msg;
                 let notify_list = &*notifies.lock().unwrap();
                 trace!("recv notify => {e:?}, {stat:?}");
+                if notify_list.is_empty() {
+                    if cfg.alerts.log_delivery {
+                        info!(
+                            "alert delivery skipped event={e:?} host={} reason=no_enabled_notifier route_keys={:?}",
+                            stat.name,
+                            dispatch.route_keys
+                        );
+                    }
+                    continue;
+                }
                 for n in notify_list {
                     let selected_route_keys = cfg.alerts.allowed_event_types(&dispatch.route_keys, n.kind());
                     if selected_route_keys.is_empty() {
