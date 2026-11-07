@@ -141,11 +141,84 @@ interval = "10m"
 [[alerts.convergence_rules.windows]]
 interval = "60m"
 
+# 事件路由：未配置某个事件时保持旧行为（广播到所有已启用渠道）。
+[alerts.events.disk_usage_high]
+channels = ["all"]
+
+[alerts.events.disk_usage_high.templates]
+title = "主机 {{ host.name }} 磁盘使用率告警"
+html = """
+<b>磁盘告警</b>
+主机：{{ host.name }}
+当前：{{ firing[0].value_percent | round }}%
+阈值：{{ firing[0].threshold }}%
+"""
+text = """
+磁盘告警
+主机：{{ host.name }}
+当前：{{ firing[0].value_percent | round }}%
+阈值：{{ firing[0].threshold }}%
+"""
+structured = """
+{"event_type":"disk_usage_high","host":"{{ host.name }}","value_percent":{{ firing[0].value_percent }},"threshold":{{ firing[0].threshold }}}
+"""
+
+[alerts.events.disk_usage_recovered]
+channels = ["wechat", "tgbot"]
+
+[alerts.events.disk_usage_recovered.templates]
+title = "主机 {{ host.name }} 磁盘告警已恢复"
+html = "✅ {{ host.name }} 磁盘告警已恢复，当前 {{ recoveries[0].value_percent | round }}%"
+text = "{{ host.name }} 磁盘告警已恢复，当前 {{ recoveries[0].value_percent | round }}%"
+structured = """
+{"event_type":"disk_usage_recovered","host":"{{ host.name }}","value_percent":{{ recoveries[0].value_percent }}}
+"""
+
+[alerts.events.memory_usage_high]
+channels = ["all"]
+
+[alerts.events.memory_usage_recovered]
+channels = ["wechat", "email"]
+
+[alerts.events.node_down]
+channels = ["wechat", "tgbot"]
+
+[alerts.events.node_down.templates]
+title = "主机 {{ host.name }} 离线告警"
+html = """
+<b>主机离线告警</b>
+主机：{{ host.name }}
+位置：{{ host.location }}
+"""
+text = """
+主机离线告警
+主机：{{ host.name }}
+位置：{{ host.location }}
+"""
+
+[alerts.events.node_up]
+channels = ["wechat", "tgbot"]
+
+[alerts.events.node_up.templates]
+title = "主机 {{ host.name }} 恢复上线"
+html = """
+<b>主机恢复上线</b>
+主机：{{ host.name }}
+位置：{{ host.location }}
+"""
+text = """
+主机恢复上线
+主机：{{ host.name }}
+位置：{{ host.location }}
+"""
+
 # https://core.telegram.org/bots/api
 # https://jinja.palletsprojects.com/en/3.0.x/templates/#if
 [tgbot]
 # 开关 true 打开
 enabled = false
+# 渲染格式：html（Telegram 默认）/text/structured
+format = "html"
 bot_token = "<tg bot token>"
 chat_id = "<chat id>"
 # host 可用字段见 payload.rs 文件 HostStat 结构, {{host.xxx}} 为占位变量
@@ -175,6 +248,8 @@ custom_tpl = """
 ## 可选 单纯记录 event 到日志文件，调试自定义告警使用
 [log]
 enabled = false
+format = "text"
+title = ""
 log_dir = "/opt/ServerStatus/logs"
 tpl = """{% set obj = dict(event=event, host=host, recoveries=recoveries, ip_info=ip_info, sys_info=sys_info) %} {{ obj | tojson}}"""
 
@@ -183,6 +258,7 @@ tpl = """{% set obj = dict(event=event, host=host, recoveries=recoveries, ip_inf
 ## 可选 微信通知
 [wechat]
 enabled = false
+format = "text"
 corp_id = "<corp id>"
 corp_secret = "<corp secret>"
 agent_id = "<agent id>"
@@ -208,6 +284,7 @@ custom_tpl = """
 ## 可选 邮件通知
 [email]
 enabled = false
+format = "html"
 server = "smtp.gmail.com"
 username = "user@email.com"
 password = "***"
@@ -240,6 +317,10 @@ custom_tpl = """
 [webhook]
 # 总开关
 enabled = false
+# 通道标题；事件模板渲染为 body，传统 receiver.script 仍可自定义完整 webhook body
+title = "ServerStatus"
+# 有事件级 structured 模板时优先发送它；否则继续使用 receiver.script
+format = "structured"
   # 可多个 webhook.receiver
   [[webhook.receiver]] # 通用型 webhook
   # 局部开关

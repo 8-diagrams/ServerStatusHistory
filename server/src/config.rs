@@ -127,6 +127,45 @@ pub struct AlertConvergenceRule {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AlertEventConfig {
+    #[serde(default = "default_alerts_true")]
+    pub enabled: bool,
+    /// `None` means all enabled channels; an empty list explicitly disables
+    /// delivery while keeping the event state and logs active.
+    #[serde(default)]
+    pub channels: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude_channels: Vec<String>,
+    #[serde(default)]
+    pub templates: AlertEventTemplates,
+}
+
+impl Default for AlertEventConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channels: None,
+            exclude_channels: Vec::new(),
+            templates: AlertEventTemplates::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AlertEventTemplates {
+    /// Optional event title. Empty titles fall back to the channel title.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub html: String,
+    #[serde(default, alias = "txt", alias = "plain")]
+    pub text: String,
+    /// Structured JSON or a Jinja template that renders JSON for Webhook.
+    #[serde(default, alias = "json", alias = "webhook")]
+    pub structured: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiskUsageAlertConfig {
     #[serde(default = "default_alerts_true")]
     pub enabled: bool,
@@ -186,6 +225,10 @@ pub struct AlertsConfig {
     pub convergence: Vec<AlertConvergenceWindow>,
     #[serde(default)]
     pub convergence_rules: Vec<AlertConvergenceRule>,
+    /// Event-to-channel routing. Missing events retain the legacy broadcast
+    /// behavior; configured events can target `all` or named channels.
+    #[serde(default)]
+    pub events: HashMap<String, AlertEventConfig>,
 }
 
 impl Default for AlertsConfig {
@@ -200,6 +243,7 @@ impl Default for AlertsConfig {
             memory_usage: MemoryUsageAlertConfig::default(),
             convergence: default_alert_convergence(),
             convergence_rules: default_alert_convergence_rules(),
+            events: HashMap::new(),
         }
     }
 }
@@ -227,6 +271,24 @@ impl AlertsConfig {
                 *alert_type = alert_type.trim().to_ascii_lowercase();
             }
         }
+        let mut normalized_events = HashMap::new();
+        for (event, mut policy) in std::mem::take(&mut self.events) {
+            let event = normalize_alert_event_name(&event);
+            if let Some(channels) = policy.channels.as_mut() {
+                for channel in channels.iter_mut() {
+                    *channel = channel.trim().to_ascii_lowercase();
+                }
+                channels.sort();
+                channels.dedup();
+            }
+            for channel in &mut policy.exclude_channels {
+                *channel = channel.trim().to_ascii_lowercase();
+            }
+            policy.exclude_channels.sort();
+            policy.exclude_channels.dedup();
+            normalized_events.insert(event, policy);
+        }
+        self.events = normalized_events;
         self.disk_usage.threshold = self.disk_usage.threshold.clamp(0.0, 100.0);
         self.disk_usage.recover_threshold = self.disk_usage.recover_threshold.clamp(0.0, 100.0);
         if self.disk_usage.recover_threshold > self.disk_usage.threshold {
@@ -237,6 +299,38 @@ impl AlertsConfig {
         if self.memory_usage.recover_threshold > self.memory_usage.threshold {
             self.memory_usage.recover_threshold = self.memory_usage.threshold;
         }
+    }
+
+    pub fn allowed_event_types(&self, event_types: &[String], channel: &str) -> Vec<String> {
+        if self.events.is_empty() {
+            return event_types.to_vec();
+        }
+        let channel = channel.trim().to_ascii_lowercase();
+        event_types
+            .iter()
+            .filter(|event| {
+                let Some(policy) = self.events.get(&normalize_alert_event_name(event)) else {
+                    return true;
+                };
+                policy.enabled
+                    && !policy.exclude_channels.iter().any(|value| value == &channel)
+                    && policy
+                        .channels
+                        .as_ref()
+                        .is_none_or(|channels| channels.iter().any(|value| value == "all" || value == &channel))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+pub fn normalize_alert_event_name(event: &str) -> String {
+    match event.trim().to_ascii_lowercase().as_str() {
+        "nodeup" | "node_up" => "node_up".to_string(),
+        "nodedown" | "node_down" => "node_down".to_string(),
+        "custom" => "custom".to_string(),
+        "alertrecovered" | "alert_recovered" => "alert_recovered".to_string(),
+        value => value.to_string(),
     }
 }
 
@@ -629,6 +723,20 @@ fn log_alert_config_sources(raw: Option<&toml::Value>, alerts: &AlertsConfig) {
         alerts.state_path,
         alerts.convergence_rules.len()
     );
+    for (event, policy) in &alerts.events {
+        let channels = policy
+            .channels
+            .as_ref()
+            .map(|values| values.join(","))
+            .unwrap_or_else(|| "all".to_string());
+        log::info!(
+            "config effective alert_route event={} enabled={} channels={} excluded={}",
+            event,
+            policy.enabled,
+            channels,
+            policy.exclude_channels.join(",")
+        );
+    }
 }
 
 fn log_alert_metric_sources(
@@ -808,6 +916,10 @@ fn migrate_config_text(original: &str) -> (String, usize) {
     }
     if !text.contains("[[alerts.convergence_rules]]") {
         text.push_str("\n# Alert convergence rule added by stat_server config migrate.\n[[alerts.convergence_rules]]\nid = \"resource-default\"\nalert_types = [\"disk_usage_high\", \"memory_usage_high\"]\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"5m\"\n\n[[alerts.convergence_rules.windows]]\nmax_notifications = 3\ninterval = \"10m\"\n\n[[alerts.convergence_rules.windows]]\ninterval = \"60m\"\n");
+        changes += 1;
+    }
+    if !text.contains("[alerts.events.") {
+        text.push_str("\n# Event routing added by stat_server config migrate.\n# `all` preserves the legacy broadcast behavior; narrow these lists as needed.\n[alerts.events.disk_usage_high]\nchannels = [\"all\"]\n\n[alerts.events.disk_usage_recovered]\nchannels = [\"all\"]\n\n[alerts.events.memory_usage_high]\nchannels = [\"all\"]\n\n[alerts.events.memory_usage_recovered]\nchannels = [\"all\"]\n\n[alerts.events.node_down]\nchannels = [\"all\"]\n\n[alerts.events.node_up]\nchannels = [\"all\"]\n");
         changes += 1;
     }
     for (kind, field) in [("memory", "memory_usage"), ("disk", "disk_usage")] {
@@ -1107,6 +1219,30 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.alerts.convergence_rules[0].alert_types.len(), 2);
         assert_eq!(cfg.alerts.convergence_rules[0].windows[0].interval, "2m");
+    }
+
+    #[test]
+    fn event_routes_select_named_channels_and_keep_legacy_defaults() {
+        let cfg = from_str(
+            r#"
+                [alerts.events.disk_usage_high]
+                channels = [" WeChat ", "tgbot"]
+                [alerts.events.disk_usage_recovered]
+                channels = []
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.alerts.allowed_event_types(&["disk_usage_high".to_string()], "wechat"),
+            vec!["disk_usage_high"]
+        );
+        assert!(cfg.alerts.allowed_event_types(&["disk_usage_high".to_string()], "email").is_empty());
+        assert!(cfg.alerts.allowed_event_types(&["disk_usage_recovered".to_string()], "wechat").is_empty());
+        // An event without an explicit policy retains the old broadcast behavior.
+        assert_eq!(
+            cfg.alerts.allowed_event_types(&["node_down".to_string()], "email"),
+            vec!["node_down"]
+        );
     }
 
     #[test]

@@ -3,6 +3,8 @@
 use anyhow::Result;
 use chrono::Local;
 use log::warn;
+use log::{error, info};
+use minijinja::context;
 use reqwest;
 use rhai::serde::{from_dynamic, to_dynamic};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Scope, AST};
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::Duration;
 
-use crate::notifier::{get_tag, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, render_notification_message, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "webhook";
 
@@ -28,8 +30,16 @@ pub struct Receiver {
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub enabled: bool,
+    #[serde(default)]
+    pub title: String,
+    /// Event templates are rendered as a structured request body. Existing
+    /// Rhai receiver scripts remain the fallback when no event template is set.
+    #[serde(default = "default_format")]
+    pub format: String,
     pub receiver: Vec<Receiver>,
 }
+
+fn default_format() -> String { "structured".to_string() }
 
 pub struct Webhook {
     config: &'static Config,
@@ -154,11 +164,54 @@ impl crate::notifier::Notifier for Webhook {
         }
         let mut queued = false;
         let mut enabled_receivers = 0;
+
+        // A structured event template is channel-wide: all enabled webhook
+        // receivers receive the same rendered body, while their existing
+        // headers/authentication remain receiver-specific. If no structured
+        // template is configured, preserve the legacy Rhai path below.
+        let routed_context = context!(
+            event => get_tag(e),
+            host => stat,
+            config => self.config,
+            title => self.config.title.clone(),
+            alerts => self.alerts,
+            recoveries => &dispatch.recovered,
+            firing => &dispatch.firing,
+            ip_info => stat.ip_info,
+            sys_info => stat.sys_info
+        );
+        let structured_message = render_notification_message(
+            self.alerts,
+            &dispatch.route_keys,
+            &self.config.format,
+            &self.config.title,
+            String::new(),
+            routed_context,
+        )?;
+        let structured_content = if structured_message.body.trim().is_empty() {
+            None
+        } else {
+            let body = serde_json::from_str::<serde_json::Value>(&structured_message.body)
+                .unwrap_or_else(|_| serde_json::Value::String(structured_message.body.clone()));
+            Some(serde_json::json!({
+                "title": structured_message.title,
+                "body": body,
+            }).to_string())
+        };
+
         for (idx, r) in self.config.receiver.iter().enumerate() {
             if !r.enabled {
                 continue;
             }
             enabled_receivers += 1;
+
+            if let Some(content) = structured_content.as_ref() {
+                info!("alert render selected notifier=webhook event={e:?} host={} format={}", stat.name, self.config.format);
+                info!("alert delivery attempt notifier=webhook event={e:?} host={} receiver={idx} mode=structured", stat.name);
+                self.call_webhook(r, content.clone(), get_tag(e), &stat.name);
+                queued = true;
+                continue;
+            }
 
             let mut scope = Scope::new();
             scope.push("event", get_tag(e));
@@ -166,6 +219,7 @@ impl crate::notifier::Notifier for Webhook {
             scope.push("config", to_dynamic(r)?);
             scope.push("alerts", to_dynamic(self.alerts)?);
             scope.push("recoveries", to_dynamic(&dispatch.recovered)?);
+            scope.push("firing", to_dynamic(&dispatch.firing)?);
             scope.push("ip_info", to_dynamic(stat.ip_info.as_ref())?);
             scope.push("sys_info", to_dynamic(stat.sys_info.as_ref())?);
 

@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 use crate::config::{AlertConvergenceRule, AlertConvergenceWindow, AlertsConfig};
-use crate::notifier::AlertRecovery;
+use crate::notifier::{AlertFiring, AlertRecovery};
 use crate::payload::HostStat;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +24,7 @@ pub struct CustomEvaluation {
     pub should_send: bool,
     pub suppressed_rule_ids: Vec<String>,
     pub recovered: Vec<AlertRecovery>,
+    pub firing: Vec<AlertFiring>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +105,7 @@ impl AlertManager {
                 should_send: true,
                 suppressed_rule_ids: Vec::new(),
                 recovered: Vec::new(),
+                firing: Vec::new(),
             };
         }
         let candidates = [
@@ -126,6 +128,7 @@ impl AlertManager {
         let mut should_send = false;
         let mut suppressed_rule_ids = Vec::new();
         let mut recovered = Vec::new();
+        let mut firing = Vec::new();
         for (alert_type, value, enabled, threshold, recover_threshold) in candidates {
             if !enabled || self.rule_for(alert_type).is_none() {
                 continue;
@@ -136,7 +139,18 @@ impl AlertManager {
             if value >= threshold {
                 known_active = true;
                 match self.evaluate_metric(alert_type, value, threshold, recover_threshold, stat, now) {
-                    AlertDecision::Send { .. } => should_send = true,
+                    AlertDecision::Send { .. } => {
+                        should_send = true;
+                        if let Some(rule) = self.rule_for(alert_type) {
+                            firing.push(AlertFiring {
+                                alert_type: alert_type.to_string(),
+                                rule_id: rule.id.clone(),
+                                value_percent: value,
+                                threshold,
+                                recover_threshold,
+                            });
+                        }
+                    }
                     AlertDecision::Suppress => suppressed_rule_ids.push(alert_type.to_string()),
                     AlertDecision::Recovered { .. } => {}
                 }
@@ -168,6 +182,7 @@ impl AlertManager {
             should_send,
             suppressed_rule_ids,
             recovered,
+            firing,
         }
     }
 

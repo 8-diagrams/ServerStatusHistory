@@ -39,3 +39,19 @@ pub fn render_template<'a>(kind: &'a str, tag: &'a str, ctx: Value, trim: bool) 
             })
         })?)
 }
+
+pub fn render_source(name: &str, source: &str, ctx: Value, trim: bool) -> Result<String> {
+    let env = JINJA_ENV.lock().map_err(|error| anyhow::anyhow!("template environment lock: {error}"))?;
+    let template = env.template_from_named_str(name, source)?;
+    let content = template.render(ctx)?;
+    if trim {
+        Ok(content
+            .split('\n')
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    } else {
+        Ok(content)
+    }
+}

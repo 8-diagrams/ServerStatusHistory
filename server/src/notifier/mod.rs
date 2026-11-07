@@ -4,6 +4,8 @@ use serde::Serialize;
 use std::sync::Mutex;
 use tokio::runtime::Handle;
 
+use crate::config::AlertsConfig;
+use crate::jinja::render_source;
 use crate::payload::HostStat;
 
 pub mod email;
@@ -30,14 +32,52 @@ pub struct AlertRecovery {
     pub recover_threshold: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertFiring {
+    pub alert_type: String,
+    pub rule_id: String,
+    pub value_percent: f64,
+    pub threshold: f64,
+    pub recover_threshold: f64,
+}
+
 /// Context attached to a notification. Marked Custom blocks can be selected
 /// with `allowed_rule_ids` or removed with `suppressed_rule_ids`; resource
 /// recovery details are carried in `recovered`.
 #[derive(Debug, Clone, Default)]
 pub struct AlertDispatch {
+    /// Event route keys, such as `disk_usage_high` or
+    /// `disk_usage_recovered`.
+    pub route_keys: Vec<String>,
+    pub firing: Vec<AlertFiring>,
     pub allowed_rule_ids: Option<Vec<String>>,
     pub suppressed_rule_ids: Vec<String>,
     pub recovered: Vec<AlertRecovery>,
+}
+
+/// Channel-neutral notification payload. Alert rules produce title/body; a
+/// notifier only adapts them to its transport protocol.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotificationMessage {
+    pub title: String,
+    pub body: String,
+}
+
+impl NotificationMessage {
+    pub fn new(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+
+    pub fn text(&self) -> String {
+        match (self.title.trim(), self.body.trim()) {
+            ("", body) => body.to_string(),
+            (title, "") => title.to_string(),
+            (title, body) => format!("{title}\n{body}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +168,100 @@ pub fn select_custom_content(
         .join("\n")
 }
 
+pub fn render_routed_format(
+    alerts: &AlertsConfig,
+    route_keys: &[String],
+    format: &str,
+    context: minijinja::value::Value,
+) -> Result<Option<String>> {
+    let normalized_format = format.trim().to_ascii_lowercase();
+    let format = match normalized_format.as_str() {
+        "json" | "webhook" => "structured",
+        "txt" | "plain" => "text",
+        value => value,
+    };
+    let mut rendered_templates = Vec::new();
+    for route_key in route_keys {
+        let Some(policy) = alerts.events.get(route_key) else {
+            continue;
+        };
+        let source = match format {
+            "html" => &policy.templates.html,
+            "text" => &policy.templates.text,
+            "structured" => &policy.templates.structured,
+            _ => continue,
+        };
+        if source.trim().is_empty() {
+            continue;
+        }
+        let rendered = render_source(
+            &format!("alert.{route_key}.{format}"),
+            source,
+            context.clone(),
+            true,
+        )?;
+        if !rendered.trim().is_empty() {
+            rendered_templates.push(rendered);
+        }
+    }
+    if rendered_templates.is_empty() {
+        Ok(None)
+    } else if format == "structured" && rendered_templates.len() > 1 {
+        let values = rendered_templates
+            .iter()
+            .map(|value| serde_json::from_str::<serde_json::Value>(value))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some(serde_json::to_string(&values)?))
+    } else {
+        Ok(Some(rendered_templates.join("\n")))
+    }
+}
+
+pub fn render_notification_message(
+    alerts: &AlertsConfig,
+    route_keys: &[String],
+    format: &str,
+    fallback_title: &str,
+    fallback_body: String,
+    context: minijinja::value::Value,
+) -> Result<NotificationMessage> {
+    let title = render_routed_title(alerts, route_keys, context.clone())?
+        .unwrap_or_else(|| fallback_title.to_string());
+    let body = render_routed_format(alerts, route_keys, format, context)?
+        .unwrap_or(fallback_body);
+    Ok(NotificationMessage::new(title, body))
+}
+
+/// Render the first non-empty event title in route order. A Custom event may
+/// contain several rule routes; its first configured title is the stable
+/// summary while all matching bodies are still combined separately.
+pub fn render_routed_title(
+    alerts: &AlertsConfig,
+    route_keys: &[String],
+    context: minijinja::value::Value,
+) -> Result<Option<String>> {
+    for route_key in route_keys {
+        let Some(source) = alerts
+            .events
+            .get(route_key)
+            .map(|policy| policy.templates.title.as_str())
+            .filter(|source| !source.trim().is_empty())
+        else {
+            continue;
+        };
+        let rendered = render_source(
+            &format!("alert.{route_key}.title"),
+            source,
+            context.clone(),
+            true,
+        )?;
+        if !rendered.trim().is_empty() {
+            return Ok(Some(rendered));
+        }
+    }
+    Ok(None)
+}
+
 fn get_tag(e: &Event) -> &'static str {
     match *e {
         Event::NodeUp => "NodeUp",
@@ -152,12 +286,15 @@ pub trait Notifier {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use minijinja::context;
 
+    use crate::config::{AlertEventConfig, AlertEventTemplates, AlertsConfig};
     use crate::jinja::{add_template, render_template};
     use crate::payload::HostStat;
 
-    use super::{get_tag, AlertRecovery, Event};
+    use super::{get_tag, render_routed_format, AlertRecovery, Event, NotificationMessage};
     use super::select_custom_content;
 
     #[test]
@@ -206,5 +343,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rendered, "node-1 disk_usage_high 70.0 75.0");
+    }
+
+    #[test]
+    fn routed_template_uses_requested_format_and_aliases() {
+        let mut alerts = AlertsConfig::default();
+        alerts.events = HashMap::from([(
+            "disk_usage_high".to_string(),
+            AlertEventConfig {
+                templates: AlertEventTemplates {
+                    title: "{{ host.name }} 告警".to_string(),
+                    html: "<b>{{ host.name }}</b>".to_string(),
+                    text: "text {{ host.name }}".to_string(),
+                    structured: "{\"host\":\"{{ host.name }}\"}".to_string(),
+                },
+                ..AlertEventConfig::default()
+            },
+        )]);
+        let host = HostStat { name: "node-1".to_string(), ..HostStat::default() };
+        let html = render_routed_format(
+            &alerts,
+            &["disk_usage_high".to_string()],
+            "html",
+            context!(host => host.clone()),
+        )
+        .unwrap();
+        assert_eq!(html.as_deref(), Some("<b>node-1</b>"));
+        let structured = render_routed_format(
+            &alerts,
+            &["disk_usage_high".to_string()],
+            "webhook",
+            context!(host => host),
+        )
+        .unwrap();
+        assert_eq!(structured.as_deref(), Some("{\"host\":\"node-1\"}"));
+        let message = super::render_notification_message(
+            &alerts,
+            &["disk_usage_high".to_string()],
+            "html",
+            "ServerStatus",
+            "fallback".to_string(),
+            context!(host => HostStat { name: "node-1".to_string(), ..HostStat::default() }),
+        )
+        .unwrap();
+        assert_eq!(message.title, "node-1 告警");
+        assert_eq!(message.body, "<b>node-1</b>");
+    }
+
+    #[test]
+    fn routed_templates_combine_multiple_text_alerts_and_json_alerts() {
+        let mut alerts = AlertsConfig::default();
+        alerts.events = HashMap::from([
+            (
+                "disk_usage_high".to_string(),
+                AlertEventConfig {
+                    templates: AlertEventTemplates {
+                        text: "disk".to_string(),
+                        structured: "{\"type\":\"disk\"}".to_string(),
+                        ..AlertEventTemplates::default()
+                    },
+                    ..AlertEventConfig::default()
+                },
+            ),
+            (
+                "memory_usage_high".to_string(),
+                AlertEventConfig {
+                    templates: AlertEventTemplates {
+                        text: "memory".to_string(),
+                        structured: "{\"type\":\"memory\"}".to_string(),
+                        ..AlertEventTemplates::default()
+                    },
+                    ..AlertEventConfig::default()
+                },
+            ),
+        ]);
+        let routes = ["disk_usage_high".to_string(), "memory_usage_high".to_string()];
+        let text = render_routed_format(&alerts, &routes, "text", context!()).unwrap();
+        assert_eq!(text.as_deref(), Some("disk\nmemory"));
+        let structured = render_routed_format(&alerts, &routes, "structured", context!()).unwrap();
+        assert_eq!(structured.as_deref(), Some(r#"[{"type":"disk"},{"type":"memory"}]"#));
+    }
+
+    #[test]
+    fn notification_message_keeps_channel_contract_to_title_and_body() {
+        let message = NotificationMessage::new("ServerStatus", "主机已离线");
+        assert_eq!(message.title, "ServerStatus");
+        assert_eq!(message.body, "主机已离线");
+        assert_eq!(message.text(), "ServerStatus\n主机已离线");
     }
 }

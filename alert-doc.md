@@ -130,6 +130,84 @@ AND
 
 配置是在进程启动时读取的，修改后需要重启服务端。服务端启动时会编译 Webhook 的 Rhai 脚本；脚本语法错误会导致启动失败，应先在测试环境验证。
 
+## 3.1 事件优先的渠道路由与多格式渲染
+
+通知采用“先事件、后渠道”的模型：服务端先生成一个标准事件，再依据事件配置选择渠道；每个渠道再选择最适合自己的表示格式。这样同一个磁盘告警可以同时渲染 HTML、纯文本和结构化 JSON，而不必为每个渠道重复写一套告警判断。
+
+事件路由写在 `[alerts.events.<event>]` 下：
+
+```toml
+[alerts.events.disk_usage_high]
+channels = ["all"]                 # 所有已启用渠道
+
+[alerts.events.disk_usage_recovered]
+channels = ["wechat", "tgbot"]    # 只投递给指定渠道
+
+[alerts.events.node_down]
+channels = []                       # 记录/维护状态，但不发送
+```
+
+规则说明：
+
+- `channels = ["all"]` 选择所有已启用的通知器；
+- `channels = ["wechat", "tgbot"]` 只选择列出的通知器；
+- `channels = []` 明确关闭该事件的投递，但事件检测、状态和日志仍然保留；
+- `exclude_channels = ["email"]` 可以在 `all` 的基础上排除渠道；
+- 未配置的事件保持旧版兼容行为：广播到所有已启用渠道；
+- 事件名不区分大小写，`NodeDown`、`node_down` 会归一化为同一个路由名。
+
+事件模板位于同一个事件下：
+
+```toml
+[alerts.events.disk_usage_high.templates]
+title = "主机 {{ host.name }} 磁盘告警"
+html = "<b>{{ host.name }}</b> 磁盘使用率 {{ firing[0].value_percent | round }}%"
+text = "{{ host.name }} 磁盘使用率 {{ firing[0].value_percent | round }}%"
+structured = """{"event_type":"disk_usage_high","host":"{{ host.name }}","value":{{ firing[0].value_percent }}}"""
+```
+
+例如上线事件可以把标题和正文分开配置：
+
+```toml
+[alerts.events.node_up.templates]
+title = "主机 {{ host.name }} 恢复上线"
+html = "<b>主机恢复上线</b><br/>主机：{{ host.name }}<br/>位置：{{ host.location }}"
+text = "主机恢复上线\n主机：{{ host.name }}\n位置：{{ host.location }}"
+```
+
+渠道的 `format` 决定选择哪个版本。默认值如下：
+
+| 渠道 | 默认格式 | 说明 |
+| --- | --- | --- |
+| `tgbot` | `html` | Telegram HTML parse mode |
+| `wechat` | `text` | 企业微信文本消息 |
+| `email` | `html` | HTML 邮件正文 |
+| `log` | `text` | 文件日志 |
+| `webhook` | `structured` | 发送统一的 `title/body` JSON |
+
+可以在渠道段覆盖：`format = "html"`、`format = "text"` 或 `format = "structured"`；`json`/`webhook` 是 `structured` 的别名，`txt`/`plain` 是 `text` 的别名。事件模板优先于旧的 `online_tpl`、`offline_tpl`、`custom_tpl` 和 `recovery_tpl`；当目标事件没有对应格式模板时，自动回退到旧渠道模板，因此旧配置无需修改。
+
+通知器内部使用统一的消息对象：
+
+```text
+message.title = alerts.events.<event>.templates.title 渲染结果
+message.body  = alerts.events.<event>.templates.<html|text|structured> 的渲染结果
+```
+
+通知器不需要知道事件是 `node_up`、`node_down` 还是磁盘告警，只负责把 `title` 和 `body` 映射到自己的协议。Telegram、企业微信通常发送 `title + body`，邮件将二者组成正文，日志写入同一文本；Webhook 在事件级 `structured` 模式下发送统一 JSON：`{"title":"...","body":<结构化内容>}`。事件没有配置 `templates.title` 时，`title` 回退到原有通知渠道配置；没有事件级 body 模板时，`body` 回退到旧的 `online_tpl`、`offline_tpl`、`custom_tpl` 或 `recovery_tpl`。
+
+Webhook 仍然完全兼容原有 `receiver.script`。当 `[alerts.events.<event>.templates].structured` 存在时，所有启用的 receiver 收到同一份 `title/body` JSON（各 receiver 的 URL、headers、认证仍独立）；没有 structured 模板时才执行原有 Rhai 脚本并按 `[true, body]` 决定是否发送。这样可以逐事件迁移，不会破坏已有 Discord、Slack、飞书等脚本。
+
+路由与渲染日志示例：
+
+```text
+alert event detected event=AlertRecovered host=node-1
+alert delivery skipped notifier=tgbot reason=route_not_selected
+alert render selected notifier=webhook event=AlertRecovered host=node-1 format=structured
+alert delivery accepted notifier=wechat event=AlertRecovered host=node-1 status=queued
+alert delivery sent notifier=webhook event=AlertRecovered host=node-1 status=200 OK
+```
+
 通知目前没有 Web 管理页面或运行时配置 API，只能通过服务端配置加载。普通部署使用 `-c` 指定 TOML；云模式使用 `--cloud`，从环境变量 `SRV_CONF` 读取完整配置：
 
 ```bash
@@ -275,6 +353,7 @@ let message = `${event}: ${host.name}`;
 | 字段 | 说明 |
 | --- | --- |
 | `[webhook].enabled` | Webhook 总开关 |
+| `[webhook].title` | 事件模板未配置 `title` 时使用的默认标题 |
 | `receiver[].enabled` | 单个目标开关 |
 | `url` | POST 目标 |
 | `headers` | 任意 HTTP 请求头，通常至少设置 `content-type` |
@@ -284,11 +363,13 @@ let message = `${event}: ${host.name}`;
 
 脚本运行时可用变量：
 
-- `event`：字符串 `NodeUp`、`NodeDown` 或 `Custom`
+- `event`：字符串 `NodeUp`、`NodeDown`、`Custom` 或 `AlertRecovered`
 - `host`：主机对象
 - `config`：当前 receiver 配置对象
 - `ip_info`：主机 IP 信息（可能为空）
 - `sys_info`：主机系统信息（可能为空）
+
+事件级 `structured` 模板还可以直接使用 `firing` 和 `recoveries` 数组；其中每个 firing 包含 `alert_type`、`rule_id`、`value_percent`、`threshold`、`recover_threshold`，每个 recovery 包含 `alert_type`、`rule_id`、`value_percent` 和 `recover_threshold`。
 
 注册的 Rhai 辅助函数：
 
@@ -315,7 +396,7 @@ host       主机状态
 config     当前通知器配置
 ip_info    上报的 IP 信息，可能为空
 sys_info   上报的系统信息，可能为空
-event      仅 log.tpl 明确提供，值为 NodeUp/NodeDown/Custom
+event      事件名：NodeUp、NodeDown、Custom 或 AlertRecovered
 ```
 
 常用 `host` 字段包括：
@@ -416,7 +497,7 @@ Jinja 的自由文本输出本身没有告警 ID，服务端不能可靠地从�
 
 旧的未标记 `custom_tpl` 仍可以启动和发送，启动时会输出 `custom template is unclassified` 警告；当需要抑制其中某一条告警时，因为无法安全拆分，服务端会保守地抑制整段旧模板。要获得精确收敛，必须给每个分支加上上述标记。服务端不会按文案、正则或模板渲染结果猜测规则 ID，避免误匹配。
 
-目前标记解析已接入 Telegram、企业微信和邮件的 `custom_tpl`；Webhook 使用 Rhai 脚本自行决定发送内容，建议在脚本中显式使用同样的告警 ID，并由后续结构化规则接入统一收敛器。
+目前标记解析已接入 Telegram、企业微信和邮件的 `custom_tpl`。Webhook 的传统 Rhai 脚本仍可自行决定发送内容；若改用事件级 `structured` 模板，则磁盘/内存告警和恢复事件会直接使用服务端结构化上下文。
 
 旧模板未加标记时，资源分支仍使用对应告警的状态指纹，但无法做到同一模板内部的独立收敛；迁移到标记块后，状态指纹使用 `rule_id:<alert_type>:<host>:<gid>`，使不同告警互不影响。
 

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tokio::time::Duration;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{get_tag, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{get_tag, render_notification_message, select_custom_content, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "tgbot";
 
@@ -19,6 +19,8 @@ fn default_recovery_tpl() -> String {
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     pub enabled: bool,
+    #[serde(default = "default_format")]
+    pub format: String,
     pub bot_token: String,
     pub chat_id: String,
     pub title: String,
@@ -28,6 +30,8 @@ pub struct Config {
     #[serde(default = "default_recovery_tpl")]
     pub recovery_tpl: String,
 }
+
+fn default_format() -> String { "html".to_string() }
 
 pub struct TGBot {
     config: &'static Config,
@@ -66,8 +70,10 @@ impl crate::notifier::Notifier for TGBot {
     fn send_notify_with_context(&self, html_content: String, event: &str, host: &str) -> Result<()> {
         let mut data = HashMap::new();
         data.insert("chat_id", self.config.chat_id.clone());
-        data.insert("parse_mode", "HTML".to_string());
         data.insert("text", html_content);
+        if self.config.format.trim().eq_ignore_ascii_case("html") {
+            data.insert("parse_mode", "HTML".to_string());
+        }
 
         let tg_url = self.tg_url.clone();
         let handle = NOTIFIER_HANDLE.lock().unwrap().as_ref().unwrap().clone();
@@ -100,28 +106,30 @@ impl crate::notifier::Notifier for TGBot {
     }
 
     fn notify(&self, e: &Event, stat: &HostStat, dispatch: &AlertDispatch) -> Result<NotifyOutcome> {
-        let content = render_template(
-            self.kind(),
-            get_tag(e),
-            context!(host => stat, config => self.config, alerts => self.alerts, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info),
-            true,
+        let context = context!(event => get_tag(e), host => stat, config => self.config, alerts => self.alerts, firing => &dispatch.firing, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info);
+        let fallback_body = render_template(self.kind(), get_tag(e), context.clone(), true)?;
+        let mut message = render_notification_message(
+            self.alerts,
+            &dispatch.route_keys,
+            &self.config.format,
+            &self.config.title,
+            fallback_body,
+            context,
         )?;
-        let content = if matches!(e, Event::Custom) {
-            select_custom_content(
-                &content,
+        if matches!(e, Event::Custom) {
+            message.body = select_custom_content(
+                &message.body,
                 dispatch.allowed_rule_ids.as_deref(),
                 &dispatch.suppressed_rule_ids,
-            )
-        } else {
-            content
-        };
-        info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, content.is_empty());
-        if content.is_empty() {
+            );
+        }
+        info!("render.alert.tpl notifier={} event={e:?} host={} content_empty={}", self.kind(), stat.name, message.body.is_empty());
+        if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);
             return Ok(NotifyOutcome::Skipped { reason: "empty_template" });
         }
         info!("alert delivery attempt notifier={} event={e:?} host={} gid={}", self.kind(), stat.name, stat.gid);
-        self.send_notify_with_context(format!("{}\n{}", self.config.title, content), get_tag(e), &stat.name)?;
+        self.send_notify_with_context(message.text(), get_tag(e), &stat.name)?;
         Ok(NotifyOutcome::Queued)
     }
 }

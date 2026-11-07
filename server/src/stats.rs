@@ -314,7 +314,10 @@ impl StatsMgr {
                                 if let Err(error) = notifier_tx.send((
                                     Event::NodeUp,
                                     Arc::clone(&arc_stat),
-                                    AlertDispatch::default(),
+                                    AlertDispatch {
+                                        route_keys: vec!["node_up".to_string()],
+                                        ..AlertDispatch::default()
+                                    },
                                 )) {
                                     error!(
                                         "alert event queue failed event=NodeUp host={} error={error}",
@@ -459,28 +462,64 @@ impl StatsMgr {
                                     Some(manager) => {
                                         let evaluation = manager.evaluate_custom(stat, now);
                                         if !evaluation.recovered.is_empty() {
+                                            let mut route_keys = evaluation
+                                                .recovered
+                                                .iter()
+                                                .map(|item| recovery_route_key(&item.alert_type))
+                                                .collect::<Vec<_>>();
+                                            route_keys.push("alert_recovered".to_string());
                                             deliveries.push((
                                                 Event::AlertRecovered,
                                                 AlertDispatch {
+                                                    route_keys,
                                                     recovered: evaluation.recovered,
                                                     ..AlertDispatch::default()
                                                 },
                                             ));
                                         }
                                         if evaluation.should_send {
+                                            let route_keys = if evaluation.firing.is_empty() {
+                                                vec!["custom".to_string()]
+                                            } else {
+                                                evaluation
+                                                    .firing
+                                                    .iter()
+                                                    .map(|item| item.alert_type.clone())
+                                                    .collect()
+                                            };
                                             deliveries.push((
                                                 Event::Custom,
                                                 AlertDispatch {
+                                                    route_keys,
+                                                    firing: evaluation.firing,
                                                     suppressed_rule_ids: evaluation.suppressed_rule_ids,
                                                     ..AlertDispatch::default()
                                                 },
                                             ));
                                         }
                                     }
-                                    None => deliveries.push((event, AlertDispatch::default())),
+                                    None => deliveries.push((
+                                        event,
+                                        AlertDispatch {
+                                            route_keys: vec!["custom".to_string()],
+                                            ..AlertDispatch::default()
+                                        },
+                                    )),
                                 }
                             } else {
-                                deliveries.push((event, AlertDispatch::default()));
+                                let route_key = match event {
+                                    Event::NodeUp => "node_up",
+                                    Event::NodeDown => "node_down",
+                                    Event::Custom => "custom",
+                                    Event::AlertRecovered => "alert_recovered",
+                                };
+                                deliveries.push((
+                                    event,
+                                    AlertDispatch {
+                                        route_keys: vec![route_key.to_string()],
+                                        ..AlertDispatch::default()
+                                    },
+                                ));
                             }
                             for (delivery_event, dispatch) in deliveries {
                                 info!(
@@ -551,8 +590,46 @@ impl StatsMgr {
                 let notify_list = &*notifies.lock().unwrap();
                 trace!("recv notify => {e:?}, {stat:?}");
                 for n in notify_list {
+                    let selected_route_keys = cfg.alerts.allowed_event_types(&dispatch.route_keys, n.kind());
+                    if selected_route_keys.is_empty() {
+                        if cfg.alerts.log_delivery {
+                            info!(
+                                "alert delivery skipped notifier={} event={e:?} host={} reason=route_not_selected route_keys={:?}",
+                                n.kind(),
+                                stat.name,
+                                dispatch.route_keys
+                            );
+                        }
+                        continue;
+                    }
+                    let mut channel_dispatch = dispatch.clone();
+                    channel_dispatch.route_keys = selected_route_keys.clone();
+                    if matches!(e, Event::Custom) && !dispatch.firing.is_empty() {
+                        let selected_firing = dispatch
+                            .firing
+                            .iter()
+                            .filter(|item| selected_route_keys.iter().any(|key| key == &item.alert_type))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        channel_dispatch.firing = selected_firing.clone();
+                        channel_dispatch.allowed_rule_ids = Some(
+                            selected_firing
+                                .iter()
+                                .map(|item| item.alert_type.clone())
+                                .collect(),
+                        );
+                    }
+                    if matches!(e, Event::AlertRecovered) && !dispatch.recovered.is_empty() {
+                        channel_dispatch.recovered.retain(|item| {
+                            selected_route_keys.iter().any(|key| key == "alert_recovered")
+                                || selected_route_keys.iter().any(|key| key == &recovery_route_key(&item.alert_type))
+                        });
+                        if channel_dispatch.recovered.is_empty() {
+                            continue;
+                        }
+                    }
                     trace!("{} notify {:?} => {:?}", n.kind(), e, stat);
-                    match n.notify(&e, &stat, &dispatch) {
+                    match n.notify(&e, &stat, &channel_dispatch) {
                         Ok(NotifyOutcome::Queued) => {
                             if cfg.alerts.log_delivery {
                                 info!(
@@ -653,6 +730,13 @@ impl StatsMgr {
 
         Ok(resp_json)
     }
+}
+
+fn recovery_route_key(alert_type: &str) -> String {
+    format!(
+        "{}_recovered",
+        alert_type.strip_suffix("_high").unwrap_or(alert_type)
+    )
 }
 
 fn filter_hosts(data: &StatsResp, directory: Option<&str>, tags: &[String]) -> StatsResp {

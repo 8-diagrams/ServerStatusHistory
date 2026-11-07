@@ -10,16 +10,22 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 
 use crate::jinja::{add_template, render_template};
-use crate::notifier::{AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
+use crate::notifier::{render_notification_message, AlertDispatch, Event, HostStat, NotifyOutcome, NOTIFIER_HANDLE};
 
 const KIND: &str = "log";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Config {
     pub enabled: bool,
+    #[serde(default = "default_format")]
+    pub format: String,
+    #[serde(default)]
+    pub title: String,
     pub log_dir: String,
     pub tpl: String,
 }
+
+fn default_format() -> String { "text".to_string() }
 
 pub struct Log {
     config: &'static Config,
@@ -99,18 +105,22 @@ impl crate::notifier::Notifier for Log {
             );
             return Ok(NotifyOutcome::Skipped { reason: "suppressed" });
         }
-        let content = render_template(
-            self.kind(),
-            "tpl",
-            context!(event => e, host => stat, config => self.config, alerts => self.alerts, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info),
-            true,
+        let context = context!(event => crate::notifier::get_tag(e), host => stat, config => self.config, alerts => self.alerts, firing => &dispatch.firing, recoveries => &dispatch.recovered, ip_info => stat.ip_info, sys_info => stat.sys_info);
+        let fallback_body = render_template(self.kind(), "tpl", context.clone(), true)?;
+        let message = render_notification_message(
+            self.alerts,
+            &dispatch.route_keys,
+            &self.config.format,
+            &self.config.title,
+            fallback_body,
+            context,
         )?;
-        if content.is_empty() {
+        if message.body.is_empty() {
             info!("alert delivery skipped notifier={} event={e:?} host={} reason=empty_template", self.kind(), stat.name);
             return Ok(NotifyOutcome::Skipped { reason: "empty_template" });
         }
         info!("alert delivery attempt notifier={} event={e:?} host={} gid={}", self.kind(), stat.name, stat.gid);
-        self.send_notify_with_context(content, crate::notifier::get_tag(e), &stat.name)?;
+        self.send_notify_with_context(message.text(), crate::notifier::get_tag(e), &stat.name)?;
         Ok(NotifyOutcome::Queued)
     }
 }
