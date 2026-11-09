@@ -41,9 +41,9 @@
 - 每次成功进入服务端统计队列后，服务端用自己的接收时间写入 `Host.latest_ts`；因此离线判断依赖“服务端最后收到数据的时间”，不依赖 Agent 携带的事件时间。
 - 定时线程每 500ms 检查：当 `now > latest_ts + offline_threshold` 时，将 IPv4/IPv6 在线状态置为离线。机器只有从在线状态变为离线时才产生一次 `offline candidate` 日志，日志包含 `last_received_at`、`gap_seconds`、`offline_threshold`、`online4` 和 `online6`；实际生成 `NodeDown` 时还会输出 `node down` 日志。
 - 主机从在线状态变为离线时产生一次 `NodeDown`。
-- 离线后再次收到上报，如果上一次服务端记录与本次上报的时间间隔超过 `offline_threshold`，产生一次 `NodeUp`。
+- 只有服务端先确认该主机进入离线状态并产生 `NodeDown` 后，恢复上报才会产生一次 `NodeUp`；单纯一次上报延迟超过 `offline_threshold` 不再伪造上线恢复事件。
 - Agent 进程重启本身不是 `NodeUp` 事件；如果重启期间的上报间隔没有超过 `offline_threshold`，服务端会继续按在线主机处理，只会产生普通的 `Custom` 检查事件。
-- 发送 `NodeDown` 后，运行时主机状态会标记为已处理，避免每个定时周期重复发送；下一次有效上报会重新恢复运行状态。
+- 发送 `NodeDown` 后，运行时主机状态会标记为已确认离线，避免每个定时周期重复发送；下一次有效上报会生成 `NodeUp` 并清除离线状态。
 - 事件使用服务端记录的最后上报时间进行状态判断；Agent 的事件时间主要用于历史数据，不能用来绕过服务端的离线判断。
 - 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error` 并返回 `400`；有效旧 Agent 的请求格式不变。
 - 固定主机启动时会预先出现在列表中，即使离线也会保留；尚未成功上报的固定主机不会伪造一次 `NodeDown`。动态 `hosts_group` 主机则受 `group_gc` 清理策略影响。
@@ -91,7 +91,7 @@ offline_threshold = 30 # 最小 30 秒
 notify_interval = 30   # 最小 30 秒
 ```
 
-`notify_interval` 是服务端事件检查的全局节流间隔，不是每个通知器各自独立的间隔。当前实现中，多个主机共享该节流时间点：同一轮可能只为一个主机生成 `Custom` 事件。因此主机很多时，不能把它理解为“每台机器每 30 秒都一定发送一次”。
+`notify_interval` 是服务端事件检查的节流间隔，按主机分别记录。某一台主机的频繁 `Custom` 检查不会再阻塞另一台主机的 `NodeDown` 判定。
 
 主机是否允许通知由以下条件共同决定：
 
@@ -750,7 +750,7 @@ RUST_LOG=debug /opt/ServerStatus/stat_server \\
 
 ## 9. 当前实现边界和后续可改进点
 
-- `notify_interval` 是全局节流，尚未做到按主机、按规则、按渠道独立限流。
+- `notify_interval` 当前按主机节流；磁盘和内存占用告警另外使用各自的持久化收敛规则。尚未结构化的 `Custom` 告警仍没有独立的规则级节流。
 - 磁盘和内存占用告警已经按规则、主机和目录持久化收敛状态；其他尚未结构化的 `Custom` 告警仍没有独立的阈值边沿状态。
 - 未标记的自由格式 `custom_tpl` 无法把最终渲染内容反向映射为具体告警类型，因此在资源告警收敛时会保守地整体抑制；使用 `ss-alert` 标记块后，服务端只移除对应告警块，其他告警可以继续发送。
 - `AlertRecovered` 目前只覆盖结构化的磁盘和内存规则；尚未结构化的自由格式 `Custom` 规则不会自动推导恢复事件。

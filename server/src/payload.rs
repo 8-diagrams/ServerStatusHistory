@@ -98,6 +98,16 @@ pub struct HostStat {
     #[serde(rename = "_agent_ts", default, skip_serializing)]
     pub agent_ts: Option<u64>,
 
+    /// Server-side state: this host crossed the offline threshold and a
+    /// NodeDown event was emitted. It is never accepted from or exposed to
+    /// Agents.
+    #[serde(skip)]
+    pub offline: bool,
+
+    /// Server-side per-host notification throttle timestamp.
+    #[serde(skip)]
+    pub last_notify_ts: u64,
+
     #[serde(skip_serializing, skip_deserializing)]
     pub pos: usize,
     #[serde(skip_serializing, skip_deserializing)]

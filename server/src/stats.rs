@@ -60,8 +60,19 @@ fn should_keep_runtime_host(
     configured_hosts.contains_key(name) || latest_ts.saturating_add(group_gc) >= now
 }
 
-fn should_notify_up(previous_latest_ts: u64, latest_ts: u64, notify: bool, offline_threshold: u64) -> bool {
-    notify && previous_latest_ts != 0 && previous_latest_ts.saturating_add(offline_threshold) < latest_ts
+fn should_notify_up(
+    previous_latest_ts: u64,
+    latest_ts: u64,
+    notify: bool,
+    offline_threshold: u64,
+    was_confirmed_offline: bool,
+) -> bool {
+    // A delayed report alone is not a recovery. The timer thread must have
+    // confirmed this host as offline and emitted NodeDown first.
+    notify
+        && was_confirmed_offline
+        && previous_latest_ts != 0
+        && previous_latest_ts.saturating_add(offline_threshold) < latest_ts
 }
 
 fn prepare_report_host(
@@ -298,24 +309,29 @@ impl StatsMgr {
 
                                 let previous_latest_ts = pre_stat.latest_ts;
                                 let report_gap = stat_t.latest_ts.saturating_sub(previous_latest_ts);
-                                let crossed_offline_threshold = should_notify_up(
-                                    previous_latest_ts,
-                                    stat_t.latest_ts,
-                                    true,
-                                    cfg.offline_threshold,
-                                );
+                                let crossed_offline_threshold = previous_latest_ts != 0
+                                    && previous_latest_ts.saturating_add(cfg.offline_threshold)
+                                        < stat_t.latest_ts;
                                 if crossed_offline_threshold {
+                                    let decision = if !stat_t.notify {
+                                        "suppressed_notify_disabled"
+                                    } else if pre_stat.offline {
+                                        "send"
+                                    } else {
+                                        "suppressed_no_prior_node_down"
+                                    };
                                     info!(
-                                        "node up candidate host={} previous_latest_ts={} received_at={} gap_seconds={} offline_threshold={} notify={} previous_online4={} previous_online6={} decision={}",
+                                        "node up candidate host={} previous_latest_ts={} received_at={} gap_seconds={} offline_threshold={} notify={} previous_offline={} previous_online4={} previous_online6={} decision={}",
                                         stat_t.name,
                                         previous_latest_ts,
                                         stat_t.latest_ts,
                                         report_gap,
                                         cfg.offline_threshold,
                                         stat_t.notify,
+                                        pre_stat.offline,
                                         pre_stat.online4,
                                         pre_stat.online6,
-                                        if stat_t.notify { "send" } else { "suppressed_notify_disabled" }
+                                        decision
                                     );
                                 }
                                 if should_notify_up(
@@ -323,9 +339,13 @@ impl StatsMgr {
                                     stat_t.latest_ts,
                                     stat_t.notify,
                                     cfg.offline_threshold,
+                                    pre_stat.offline,
                                 ) {
                                     notify_up = true;
                                 }
+                            }
+                            if notify_up {
+                                stat.to_mut().offline = false;
                             }
                             let arc_stat = Arc::new(stat.into_owned());
                             if let Some(history) = history.as_ref() {
@@ -374,7 +394,6 @@ impl StatsMgr {
             let notifier_tx = notifier_tx.clone();
             let history = self.history.clone();
             let mut alert_manager = alert_manager;
-            let mut latest_notify_ts = 0_u64;
             let mut latest_save_ts = 0_u64;
             let mut latest_group_gc = 0_u64;
             let mut latest_alert_check_ts = 0_u64;
@@ -383,7 +402,6 @@ impl StatsMgr {
 
                 let mut resp = StatsResp::new();
                 let now = resp.updated;
-                let mut any_notified = false;
 
                 // group gc
                 if latest_group_gc + cfg.group_gc < now {
@@ -448,24 +466,35 @@ impl StatsMgr {
                                 }
                             }
 
-                            // determine notify event (o is dropped after this block)
-                            if o.notify && latest_notify_ts + cfg.notify_interval < now {
-                                if o.online4 || o.online6 {
-                                    Some(Event::Custom)
-                                } else {
-                                    o.disabled = true;
-                                    if cfg.alerts.offline_log {
-                                        info!(
-                                            "node down host={} gid={} last_received_at={} gap_seconds={} offline_threshold={}",
-                                            o.name,
-                                            o.gid,
-                                            previous_latest_ts,
-                                            now.saturating_sub(previous_latest_ts),
-                                            cfg.offline_threshold
-                                        );
-                                    }
-                                    Some(Event::NodeDown)
+                            // A confirmed online -> offline transition must
+                            // produce NodeDown immediately. It must not wait
+                            // for the periodic Custom check interval.
+                            if o.notify && became_offline {
+                                // Mark the transition before queueing the
+                                // event. A later report can only generate
+                                // NodeUp after this confirmed transition.
+                                o.offline = true;
+                                o.disabled = true;
+                                if cfg.alerts.offline_log {
+                                    info!(
+                                        "node down host={} gid={} last_received_at={} gap_seconds={} offline_threshold={}",
+                                        o.name,
+                                        o.gid,
+                                        previous_latest_ts,
+                                        now.saturating_sub(previous_latest_ts),
+                                        cfg.offline_threshold
+                                    );
                                 }
+                                Some(Event::NodeDown)
+                            } else if o.notify
+                                && (o.online4 || o.online6)
+                                && o.last_notify_ts + cfg.notify_interval < now
+                            {
+                                // Custom checks are throttled per host. A
+                                // global timestamp would let another host's
+                                // frequent Custom event delay this host.
+                                o.last_notify_ts = now;
+                                Some(Event::Custom)
                             } else {
                                 None
                             }
@@ -569,15 +598,11 @@ impl StatsMgr {
                                         "alert delivery queue=accepted event={delivery_event:?} host={}",
                                         stat.name
                                     );
-                                    any_notified = true;
                                 }
                             }
                         }
 
                         resp.servers.push(Arc::clone(stat));
-                    }
-                    if any_notified {
-                        latest_notify_ts = now;
                     }
                 }
 
@@ -1104,8 +1129,9 @@ mod host_query_tests {
 
     #[test]
     fn first_report_after_startup_is_not_a_node_up_event() {
-        assert!(!should_notify_up(0, 100, true, 30));
-        assert!(should_notify_up(50, 100, true, 30));
-        assert!(!should_notify_up(50, 100, false, 30));
+        assert!(!should_notify_up(0, 100, true, 30, false));
+        assert!(!should_notify_up(50, 100, true, 30, false));
+        assert!(should_notify_up(50, 100, true, 30, true));
+        assert!(!should_notify_up(50, 100, false, 30, true));
     }
 }
