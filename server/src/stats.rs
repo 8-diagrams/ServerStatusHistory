@@ -266,8 +266,12 @@ impl StatsMgr {
                             stat_t.alias = info.alias.clone();
                         }
 
-                        info.latest_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-                        stat_t.latest_ts = info.latest_ts;
+                        let received_at = stat_t
+                            .received_ts
+                            .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+                        let agent_ts = stat_t.agent_ts;
+                        info.latest_ts = received_at;
+                        stat_t.latest_ts = received_at;
 
                         // last_network_in/out
                         if !stat_t.vnstat {
@@ -299,8 +303,29 @@ impl StatsMgr {
                             );
                         }
 
-                        info!("update stat `{stat_t:?}");
+                        debug!("update stat `{stat_t:?}");
                         if let Ok(mut host_stat_map) = stat_map.lock() {
+                            let previous_stat = host_stat_map.get(&stat_t.name);
+                            let previous_received_at = previous_stat.map(|value| value.latest_ts).unwrap_or_default();
+                            let previous_agent_ts = previous_stat.and_then(|value| value.agent_ts);
+                            let receive_gap_seconds = (previous_received_at != 0)
+                                .then(|| received_at.saturating_sub(previous_received_at));
+                            let agent_gap_seconds = agent_ts
+                                .zip(previous_agent_ts)
+                                .map(|(current, previous)| current as i128 - previous as i128);
+                            let agent_delay_seconds =
+                                agent_ts.map(|timestamp| received_at as i128 - timestamp as i128);
+                            info!(
+                                "agent report timing host={} gid={} received_at={} agent_ts={} receive_gap_seconds={} agent_gap_seconds={} agent_delay_seconds={} timestamp_source={}",
+                                stat_t.name,
+                                stat_t.gid,
+                                received_at,
+                                agent_ts.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                receive_gap_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                agent_gap_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                agent_delay_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                if agent_ts.is_some() { "agent" } else { "server" },
+                            );
                             let mut notify_up = false;
                             if let Some(pre_stat) = host_stat_map.get(&stat_t.name) {
                                 if stat_t.ip_info.is_none() {
@@ -779,10 +804,17 @@ impl StatsMgr {
 
     #[allow(clippy::unused_self)]
     #[allow(clippy::unnecessary_wraps)]
-    pub fn report(&self, data: serde_json::Value) -> Result<()> {
+    pub fn report(&self, mut data: serde_json::Value) -> Result<()> {
         static SENDER: LazyLock<SyncSender<Cow<'static, HostStat>>> =
             LazyLock::new(|| STAT_SENDER.get().unwrap().clone());
 
+        // Capture the server-side receive time before the bounded queue. This
+        // distinguishes network/Agent gaps from time spent waiting for the
+        // statistics worker and does not alter the Agent wire protocol.
+        if let Some(object) = data.as_object_mut() {
+            let received_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            object.insert("_received_ts".to_string(), serde_json::json!(received_at));
+        }
         match serde_json::from_value(data) {
             Ok(stat) => {
                 trace!("send stat => {stat:?} ");

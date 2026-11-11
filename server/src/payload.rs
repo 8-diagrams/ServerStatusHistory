@@ -98,6 +98,11 @@ pub struct HostStat {
     #[serde(rename = "_agent_ts", default, skip_serializing)]
     pub agent_ts: Option<u64>,
 
+    /// Server receive timestamp captured at the HTTP/gRPC report boundary.
+    /// This is internal and never exposed to Agents or public JSON.
+    #[serde(rename = "_received_ts", default, skip_serializing)]
+    pub received_ts: Option<u64>,
+
     /// Server-side state: this host crossed the offline threshold and a
     /// NodeDown event was emitted. It is never accepted from or exposed to
     /// Agents.

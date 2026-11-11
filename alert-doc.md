@@ -45,6 +45,13 @@
 - Agent 进程重启本身不是 `NodeUp` 事件；如果重启期间的上报间隔没有超过 `offline_threshold`，服务端会继续按在线主机处理，只会产生普通的 `Custom` 检查事件。
 - 发送 `NodeDown` 后，运行时主机状态会标记为已确认离线，避免每个定时周期重复发送；下一次有效上报会生成 `NodeUp` 并清除离线状态。
 - 事件使用服务端记录的最后上报时间进行状态判断；Agent 的事件时间主要用于历史数据，不能用来绕过服务端的离线判断。
+- 每个有效上报都会记录一条 `agent report timing` 日志，将服务端接收时间和 Agent 原始时间放在同一行。示例：
+
+  ```text
+  agent report timing host=node-1 gid= received_at=1794390000 agent_ts=1794389998 receive_gap_seconds=31 agent_gap_seconds=31 agent_delay_seconds=2 timestamp_source=agent
+  ```
+
+  字段含义：`received_at` 是服务端收到并接受该请求的 Unix 秒时间戳；`agent_ts` 是 Agent 数据包携带的原始 `latest_ts`；`receive_gap_seconds` 是服务端与该主机上一次有效上报之间的间隔，离线判定使用这个值；`agent_gap_seconds` 是本次与上次 Agent 原始时间的间隔；`agent_delay_seconds = received_at - agent_ts`，正数表示数据到达时相对 Agent 时间的延迟，负数通常表示 Agent 时钟快于服务端；`timestamp_source=server` 表示旧版 Agent 没有携带原始时间。该日志中的 `received_at` 在进入内部队列前写入，因此还可以识别服务端内部排队延迟。
 - 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error` 并返回 `400`；有效旧 Agent 的请求格式不变。
 - 固定主机启动时会预先出现在列表中，即使离线也会保留；尚未成功上报的固定主机不会伪造一次 `NodeDown`。动态 `hosts_group` 主机则受 `group_gc` 清理策略影响。
 

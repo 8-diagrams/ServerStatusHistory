@@ -530,6 +530,9 @@ pub(crate) fn preserve_agent_timestamp(value: &mut Value) {
         // `_agent_ts` is server-internal. Never trust a value supplied by an
         // Agent, including older/custom JSON clients.
         object.remove("_agent_ts");
+        // The receive timestamp is assigned by StatsMgr::report at the
+        // server boundary. Never carry a client-supplied value forward.
+        object.remove("_received_ts");
         if let Some(ts) = object.get("latest_ts").and_then(Value::as_u64) {
             object.insert("_agent_ts".to_string(), json!(ts));
         }
@@ -546,6 +549,10 @@ mod host_query_tests {
         let mut report = json!({"latest_ts": 123, "_agent_ts": 999});
         preserve_agent_timestamp(&mut report);
         assert_eq!(report["_agent_ts"], 123);
+
+        let mut forged_receive_time = json!({"latest_ts": 123, "_received_ts": 999});
+        preserve_agent_timestamp(&mut forged_receive_time);
+        assert!(forged_receive_time.get("_received_ts").is_none());
 
         let mut old_python_report = json!({"name": "legacy", "_agent_ts": 999});
         preserve_agent_timestamp(&mut old_python_report);

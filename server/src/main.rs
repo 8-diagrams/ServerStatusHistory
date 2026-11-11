@@ -137,7 +137,12 @@ pub async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let mut logger = pretty_env_logger::formatted_builder();
-    if std::env::var_os("RUST_LOG").is_none() {
+    if let Ok(filters) = std::env::var("RUST_LOG") {
+        // `formatted_builder()` does not automatically parse RUST_LOG. Keep
+        // the systemd-provided filter effective instead of silently falling
+        // back to env_logger's default error-only level.
+        logger.parse_filters(&filters);
+    } else {
         logger.filter_level(log::LevelFilter::Info);
     }
     logger.init();
