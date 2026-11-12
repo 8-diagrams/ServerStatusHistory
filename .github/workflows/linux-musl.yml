@@ -103,17 +103,46 @@ jobs:
         continue-on-error: true
         run: llvm-strip "target/${{ matrix.target }}/release/stat_server"
 
-      - name: Package
-        uses: TheDoctor0/zip-release@0.7.6
+      - name: Prepare package files
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/stat_server" dist/
+          cp config.toml dist/
+          cp systemd/stat_server.service dist/
+          cp scripts/deploy-server.sh dist/
+          chmod +x dist/deploy-server.sh
+
+      - name: Upload package files
+        uses: actions/upload-artifact@v4
         with:
-          type: zip
-          filename: stat_server-${{ matrix.target }}.zip
-          directory: ./
-          path: |
-            target/${{ matrix.target }}/release/stat_server
-            config.toml
-            systemd/stat_server.service
-            scripts/deploy-server.sh
+          name: stat_server-files-${{ matrix.target }}
+          path: dist
+          if-no-files-found: error
+
+  package:
+    name: Package Server ${{ matrix.target }}
+    needs: linux-musl
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+
+    steps:
+      - name: Download package files
+        uses: actions/download-artifact@v4
+        with:
+          name: stat_server-files-${{ matrix.target }}
+          path: dist
+
+      # This runs on the GitHub-hosted Ubuntu runner, where zip is present;
+      # the cross-compile container is deliberately kept free of APT tools.
+      - name: Create ZIP archive
+        run: |
+          cd dist
+          zip -r "../stat_server-${{ matrix.target }}.zip" .
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

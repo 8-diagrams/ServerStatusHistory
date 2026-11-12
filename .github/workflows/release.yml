@@ -79,8 +79,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # common/build.rs uses protobuf-src to provide protoc; packaging uses
-      # zip-release below, so this container needs no APT network access.
+      # common/build.rs uses protobuf-src to provide protoc. Packaging is done
+      # by the separate Ubuntu-hosted linux-package job, so this container
+      # needs no APT network access and never needs a zip executable.
       - name: Verify container Rust toolchain
         run: |
           rustc --version
@@ -99,16 +100,43 @@ jobs:
             target/${{ matrix.platform.target }}/release/stat_client
           args: --best --lzma
 
-      - name: Zip Release
-        uses: TheDoctor0/zip-release@0.7.6
+      - name: Prepare Linux package files
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.platform.target }}/release/stat_server" dist/
+          cp "target/${{ matrix.platform.target }}/release/stat_client" dist/
+          cp config.toml dist/
+
+      - name: Upload Linux package files
+        uses: actions/upload-artifact@v4
         with:
-          type: zip
-          filename: ServerStatus-${{ matrix.platform.target }}.zip
-          directory: ./
-          path: |
-            target/${{ matrix.platform.target }}/release/stat_server
-            target/${{ matrix.platform.target }}/release/stat_client
-            config.toml
+          name: release-linux-files-${{ matrix.platform.target }}
+          path: dist
+
+  linux-package:
+    name: Package linux (${{ matrix.platform.target }})
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: "x86_64-unknown-linux-musl"
+          - target: "aarch64-unknown-linux-musl"
+
+    steps:
+      - name: Download Linux package files
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-files-${{ matrix.platform.target }}
+          path: dist
+
+      - name: Create ZIP archive
+        run: |
+          cd dist
+          zip -r "../ServerStatus-${{ matrix.platform.target }}.zip" .
 
       - name: Upload binaries to GitHub Release
         uses: softprops/action-gh-release@v2
