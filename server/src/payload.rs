@@ -103,6 +103,11 @@ pub struct HostStat {
     #[serde(rename = "_received_ts", default, skip_serializing)]
     pub received_ts: Option<u64>,
 
+    /// Millisecond precision receive timestamp used only for diagnosing
+    /// server-side queue and worker latency. It is never exposed publicly.
+    #[serde(rename = "_received_ts_ms", default, skip_serializing)]
+    pub received_ts_ms: Option<u64>,
+
     /// Server-side state: this host crossed the offline threshold and a
     /// NodeDown event was emitted. It is never accepted from or exposed to
     /// Agents.

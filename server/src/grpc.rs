@@ -25,7 +25,10 @@ impl ServerStatus for ServerStatusSrv {
                 Ok(v) => {
                     let mut v = v;
                     crate::http::preserve_agent_timestamp(&mut v);
-                    let _ = mgr.report(v);
+                    if let Err(error) = mgr.report(v) {
+                        debug!("grpc report rejected reason=server_overloaded error={error:#}");
+                        return Err(Status::resource_exhausted("statistics report queue is full"));
+                    }
                 }
                 Err(err) => {
                     error!("serde_json::to_value err => {err:?}");

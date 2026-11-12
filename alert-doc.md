@@ -38,21 +38,23 @@
 ### 2.1 上线和掉线
 
 - `offline_threshold` 是无上报多久后判定离线，默认 `30` 秒，服务端会把小于 `30` 的值强制改为 `30`。
-- 每次成功进入服务端统计队列后，服务端用自己的接收时间写入 `Host.latest_ts`；因此离线判断依赖“服务端最后收到数据的时间”，不依赖 Agent 携带的事件时间。
-- 定时线程每 500ms 检查：当 `now > latest_ts + offline_threshold` 时，将 IPv4/IPv6 在线状态置为离线。机器只有从在线状态变为离线时才产生一次 `offline candidate` 日志，日志包含 `last_received_at`、`gap_seconds`、`offline_threshold`、`online4` 和 `online6`；实际生成 `NodeDown` 时还会输出 `node down` 日志。
+- 服务端在 HTTP/gRPC 入口记录每台主机最后一次 report 到达时间；离线判断使用这个入口时间，而不是统计 worker 处理完成的时间。因此 report 即使正在内部队列等待，也不会因为服务端自身排队而被误判为离线。Agent 携带的事件时间仍只用于延迟分析和历史数据。
+- 定时线程每 500ms 检查：当 `now > last_received_at + offline_threshold` 时，将 IPv4/IPv6 在线状态置为离线。机器只有从在线状态变为离线时才产生一次 `offline candidate` 日志，日志包含 `last_received_at`、`gap_seconds`、`offline_threshold`、`online4` 和 `online6`；实际生成 `NodeDown` 时还会输出 `node down` 日志。
 - 主机从在线状态变为离线时产生一次 `NodeDown`。
 - 只有服务端先确认该主机进入离线状态并产生 `NodeDown` 后，恢复上报才会产生一次 `NodeUp`；单纯一次上报延迟超过 `offline_threshold` 不再伪造上线恢复事件。
 - Agent 进程重启本身不是 `NodeUp` 事件；如果重启期间的上报间隔没有超过 `offline_threshold`，服务端会继续按在线主机处理，只会产生普通的 `Custom` 检查事件。
 - 发送 `NodeDown` 后，运行时主机状态会标记为已确认离线，避免每个定时周期重复发送；下一次有效上报会生成 `NodeUp` 并清除离线状态。
 - 事件使用服务端记录的最后上报时间进行状态判断；Agent 的事件时间主要用于历史数据，不能用来绕过服务端的离线判断。
-- 每个有效上报都会记录一条 `agent report timing` 日志，将服务端接收时间和 Agent 原始时间放在同一行。示例：
+- 服务端使用统一的 `agent report timing` 格式，将服务端接收时间和 Agent 原始时间放在同一行。正常上报使用 `DEBUG`，接收间隔达到离线阈值一半时提升为 `INFO`，内部排队超过 1 秒时提升为 `WARN`，避免每秒上报的正常流量淹没 journald。示例：
 
   ```text
-  agent report timing host=node-1 gid= received_at=1794390000 agent_ts=1794389998 receive_gap_seconds=31 agent_gap_seconds=31 agent_delay_seconds=2 timestamp_source=agent
+  agent report timing host=node-1 gid= received_at=1794390000 agent_ts=1794389998 receive_gap_seconds=31 agent_gap_seconds=31 agent_delay_seconds=2 queue_delay_ms=4 timestamp_source=agent
   ```
 
-  字段含义：`received_at` 是服务端收到并接受该请求的 Unix 秒时间戳；`agent_ts` 是 Agent 数据包携带的原始 `latest_ts`；`receive_gap_seconds` 是服务端与该主机上一次有效上报之间的间隔，离线判定使用这个值；`agent_gap_seconds` 是本次与上次 Agent 原始时间的间隔；`agent_delay_seconds = received_at - agent_ts`，正数表示数据到达时相对 Agent 时间的延迟，负数通常表示 Agent 时钟快于服务端；`timestamp_source=server` 表示旧版 Agent 没有携带原始时间。该日志中的 `received_at` 在进入内部队列前写入，因此还可以识别服务端内部排队延迟。
-- 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error` 并返回 `400`；有效旧 Agent 的请求格式不变。
+  字段含义：`received_at` 是服务端收到并接受该请求的 Unix 秒时间戳；`agent_ts` 是 Agent 数据包携带的原始 `latest_ts`；`receive_gap_seconds` 是本次与上次 report 到达服务端的间隔；`agent_gap_seconds` 是本次与上次 Agent 原始时间的间隔；`agent_delay_seconds = received_at - agent_ts`，正数表示数据到达时相对 Agent 时间的延迟，负数通常表示 Agent 时钟快于服务端；`queue_delay_ms` 是 report 到达入口后等待统计 worker 处理的毫秒数；`timestamp_source=server` 表示旧版 Agent 没有携带原始时间。
+- report 队列满时服务端不会阻塞 HTTP/gRPC 执行线程：它保留本次到达时间用于在线判定、丢弃本次指标样本、输出 `report queue full ... action=drop_metrics_keep_liveness` 警告，并向 HTTP 返回 `503`、向 gRPC 返回 `ResourceExhausted`。Agent 上报格式没有改变。
+- 如果上报 JSON/Protobuf 反序列化失败，HTTP `/report` 会记录 `report error`；有效旧 Agent 的请求格式不变。
+- 服务端处理出现瓶颈时会输出结构化警告，包括 `report queue full`、`agent report timing ... queue_delay_ms=...`、`stats state lock contention`、`report processing slow`、`notifier queue backlog` 和 `stats timer cycle slow`。同类瓶颈警告默认最多每 10 秒输出一次，避免故障期间的日志风暴。
 - 固定主机启动时会预先出现在列表中，即使离线也会保留；尚未成功上报的固定主机不会伪造一次 `NodeDown`。动态 `hosts_group` 主机则受 `group_gc` 清理策略影响。
 
 ### 2.2 自定义规则

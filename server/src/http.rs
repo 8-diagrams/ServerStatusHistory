@@ -517,8 +517,9 @@ pub async fn report(_auth: auth::HostAuth, req_header: HeaderMap, body: Bytes) -
     }
 
     if let Some(mgr) = G_STATS_MGR.get() {
-        if mgr.report(json_data.unwrap()).is_err() {
-            return StatusCode::BAD_REQUEST;
+        if let Err(error) = mgr.report(json_data.unwrap()) {
+            debug!("report rejected reason=server_overloaded error={error:#}");
+            return StatusCode::SERVICE_UNAVAILABLE;
         }
     }
 
@@ -533,6 +534,7 @@ pub(crate) fn preserve_agent_timestamp(value: &mut Value) {
         // The receive timestamp is assigned by StatsMgr::report at the
         // server boundary. Never carry a client-supplied value forward.
         object.remove("_received_ts");
+        object.remove("_received_ts_ms");
         if let Some(ts) = object.get("latest_ts").and_then(Value::as_u64) {
             object.insert("_agent_ts".to_string(), json!(ts));
         }
@@ -553,6 +555,10 @@ mod host_query_tests {
         let mut forged_receive_time = json!({"latest_ts": 123, "_received_ts": 999});
         preserve_agent_timestamp(&mut forged_receive_time);
         assert!(forged_receive_time.get("_received_ts").is_none());
+
+        let mut forged_receive_time_ms = json!({"latest_ts": 123, "_received_ts_ms": 999});
+        preserve_agent_timestamp(&mut forged_receive_time_ms);
+        assert!(forged_receive_time_ms.get("_received_ts_ms").is_none());
 
         let mut old_python_report = json!({"name": "legacy", "_agent_ts": 999});
         preserve_agent_timestamp(&mut old_python_report);

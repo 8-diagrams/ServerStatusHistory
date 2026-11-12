@@ -8,12 +8,12 @@ use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::sync::mpsc::sync_channel;
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::alerts::AlertManager;
 use crate::config::{Host, HostGroup};
@@ -22,11 +22,74 @@ use crate::notifier::{AlertDispatch, Event, Notifier, NotifyOutcome};
 use crate::payload::{HostStat, StatsResp};
 
 const SAVE_INTERVAL: u64 = 60;
+const REPORT_QUEUE_CAPACITY: usize = 512;
+const NOTIFIER_QUEUE_WARN_DEPTH: usize = 256;
+const BOTTLENECK_WARN_MS: u128 = 1_000;
+const BOTTLENECK_WARN_INTERVAL_MS: u64 = 10_000;
 const OS_LIST: [&str; 10] = [
     "centos", "debian", "ubuntu", "arch", "windows", "macos", "pi", "android", "linux", "freebsd",
 ];
 
 static STAT_SENDER: OnceCell<SyncSender<Cow<HostStat>>> = OnceCell::new();
+static REPORT_QUEUE_DELAY_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+static REPORT_QUEUE_FULL_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+static STATE_LOCK_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+static REPORT_PROCESSING_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+static NOTIFIER_QUEUE_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+static TIMER_CYCLE_WARNED_AT: AtomicU64 = AtomicU64::new(0);
+
+type NotifyMessage = (Event, Arc<HostStat>, AlertDispatch);
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(u64::MAX)
+}
+
+fn bottleneck_warning_allowed(last_warned_at: &AtomicU64) -> bool {
+    let now = unix_now_ms();
+    let previous = last_warned_at.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) < BOTTLENECK_WARN_INTERVAL_MS {
+        return false;
+    }
+    last_warned_at
+        .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+fn enqueue_notification(
+    sender: &Sender<NotifyMessage>,
+    queue_depth: &AtomicUsize,
+    source: &str,
+    event: Event,
+    stat: Arc<HostStat>,
+    dispatch: AlertDispatch,
+) -> std::result::Result<usize, &'static str> {
+    let depth = queue_depth.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if depth >= NOTIFIER_QUEUE_WARN_DEPTH && bottleneck_warning_allowed(&NOTIFIER_QUEUE_WARNED_AT) {
+        warn!(
+            "notifier queue backlog source={} event={event:?} host={} depth={} threshold={}",
+            source, stat.name, depth, NOTIFIER_QUEUE_WARN_DEPTH
+        );
+    }
+    match sender.send((event, stat, dispatch)) {
+        Ok(()) => Ok(depth),
+        Err(_) => {
+            queue_depth.fetch_sub(1, Ordering::Relaxed);
+            Err("notification receiver disconnected")
+        }
+    }
+}
+
+fn effective_last_received(processed_at: u64, ingress_at: Option<u64>) -> u64 {
+    ingress_at.unwrap_or(processed_at).max(processed_at)
+}
+
+fn is_report_offline(last_received_at: u64, now: u64, offline_threshold: u64) -> bool {
+    last_received_at.saturating_add(offline_threshold) < now
+}
 
 fn configured_host_stat(host: &Host) -> HostStat {
     HostStat {
@@ -115,6 +178,9 @@ fn prepare_report_host(
 pub struct StatsMgr {
     resp_json: Arc<Mutex<String>>,
     stats_data: Arc<Mutex<StatsResp>>,
+    /// Liveness is based on reports accepted at the HTTP/gRPC boundary, not
+    /// on when the single statistics worker eventually processes them.
+    last_report_received: Arc<Mutex<HashMap<String, u64>>>,
     history: Option<Arc<HistoryService>>,
 }
 
@@ -123,6 +189,7 @@ impl StatsMgr {
         Self {
             resp_json: Arc::new(Mutex::new("{}".to_string())),
             stats_data: Arc::new(Mutex::new(StatsResp::new())),
+            last_report_received: Arc::new(Mutex::new(HashMap::new())),
             history: None,
         }
     }
@@ -190,9 +257,10 @@ impl StatsMgr {
             Self::load_last_network(&mut hosts_map_guard);
         }
 
-        let (stat_tx, stat_rx) = sync_channel(512);
+        let (stat_tx, stat_rx) = sync_channel(REPORT_QUEUE_CAPACITY);
         STAT_SENDER.set(stat_tx).unwrap();
-        let (notifier_tx, notifier_rx) = sync_channel(512);
+        let (notifier_tx, notifier_rx) = channel();
+        let notifier_queue_depth = Arc::new(AtomicUsize::new(0));
         let alert_manager = cfg.alerts.enabled.then(|| AlertManager::new(&cfg.alerts));
 
         // Fixed hosts are part of the server configuration, not ephemeral
@@ -211,13 +279,21 @@ impl StatsMgr {
             let hosts_map = hosts_map_base.clone();
             let stat_map = stat_map.clone();
             let notifier_tx = notifier_tx.clone();
+            let notifier_queue_depth = notifier_queue_depth.clone();
             let history = self.history.clone();
 
             move || loop {
                 while let Ok(mut stat) = stat_rx.recv() {
+                    let report_processing_started = Instant::now();
                     trace!("recv stat `{stat:?}");
 
                     let stat_t = stat.to_mut();
+                    let report_host = stat_t.name.clone();
+                    let queue_delay_ms = stat_t
+                        .received_ts_ms
+                        .map(|received_at| unix_now_ms().saturating_sub(received_at));
+                    let queue_delay_is_bottleneck =
+                        queue_delay_ms.is_some_and(|delay| u128::from(delay) >= BOTTLENECK_WARN_MS);
 
                     // Resolve fixed-vs-dynamic identity before applying the
                     // report. This does not change the Agent wire protocol.
@@ -304,7 +380,19 @@ impl StatsMgr {
                         }
 
                         debug!("update stat `{stat_t:?}");
+                        let state_lock_started = Instant::now();
                         if let Ok(mut host_stat_map) = stat_map.lock() {
+                            let state_lock_wait_ms = state_lock_started.elapsed().as_millis();
+                            if state_lock_wait_ms >= BOTTLENECK_WARN_MS
+                                && bottleneck_warning_allowed(&STATE_LOCK_WARNED_AT)
+                            {
+                                warn!(
+                                    "stats state lock contention source=report_worker host={} wait_ms={} threshold_ms={}",
+                                    report_host,
+                                    state_lock_wait_ms,
+                                    BOTTLENECK_WARN_MS
+                                );
+                            }
                             let previous_stat = host_stat_map.get(&stat_t.name);
                             let previous_received_at = previous_stat.map(|value| value.latest_ts).unwrap_or_default();
                             let previous_agent_ts = previous_stat.and_then(|value| value.agent_ts);
@@ -315,8 +403,20 @@ impl StatsMgr {
                                 .map(|(current, previous)| current as i128 - previous as i128);
                             let agent_delay_seconds =
                                 agent_ts.map(|timestamp| received_at as i128 - timestamp as i128);
-                            info!(
-                                "agent report timing host={} gid={} received_at={} agent_ts={} receive_gap_seconds={} agent_gap_seconds={} agent_delay_seconds={} timestamp_source={}",
+                            let timing_level = if queue_delay_is_bottleneck
+                                && bottleneck_warning_allowed(&REPORT_QUEUE_DELAY_WARNED_AT)
+                            {
+                                log::Level::Warn
+                            } else if receive_gap_seconds.is_some_and(|gap| {
+                                gap >= cfg.offline_threshold.saturating_div(2).max(1)
+                            }) {
+                                log::Level::Info
+                            } else {
+                                log::Level::Debug
+                            };
+                            log::log!(
+                                timing_level,
+                                "agent report timing host={} gid={} received_at={} agent_ts={} receive_gap_seconds={} agent_gap_seconds={} agent_delay_seconds={} queue_delay_ms={} timestamp_source={}",
                                 stat_t.name,
                                 stat_t.gid,
                                 received_at,
@@ -324,6 +424,7 @@ impl StatsMgr {
                                 receive_gap_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
                                 agent_gap_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
                                 agent_delay_seconds.map_or_else(|| "-".to_string(), |value| value.to_string()),
+                                queue_delay_ms.map_or_else(|| "-".to_string(), |value| value.to_string()),
                                 if agent_ts.is_some() { "agent" } else { "server" },
                             );
                             let mut notify_up = false;
@@ -383,14 +484,18 @@ impl StatsMgr {
                                     arc_stat.name,
                                     arc_stat.gid
                                 );
-                                if let Err(error) = notifier_tx.send((
+                                let send_result = enqueue_notification(
+                                    &notifier_tx,
+                                    &notifier_queue_depth,
+                                    "report_worker",
                                     Event::NodeUp,
                                     Arc::clone(&arc_stat),
                                     AlertDispatch {
                                         route_keys: vec!["node_up".to_string()],
                                         ..AlertDispatch::default()
                                     },
-                                )) {
+                                );
+                                if let Err(error) = send_result {
                                     error!(
                                         "alert event queue failed event=NodeUp host={} error={error}",
                                         arc_stat.name
@@ -406,6 +511,18 @@ impl StatsMgr {
                             //trace!("{:?}", host_stat_map);
                         }
                     }
+
+                    let processing_ms = report_processing_started.elapsed().as_millis();
+                    if processing_ms >= BOTTLENECK_WARN_MS
+                        && bottleneck_warning_allowed(&REPORT_PROCESSING_WARNED_AT)
+                    {
+                        warn!(
+                            "report processing slow host={} duration_ms={} threshold_ms={}",
+                            report_host,
+                            processing_ms,
+                            BOTTLENECK_WARN_MS
+                        );
+                    }
                 }
             }
         });
@@ -416,7 +533,9 @@ impl StatsMgr {
             let stats_data = self.stats_data.clone();
             let hosts_map = hosts_map_base.clone();
             let stat_map = stat_map.clone();
+            let last_report_received = self.last_report_received.clone();
             let notifier_tx = notifier_tx.clone();
+            let notifier_queue_depth = notifier_queue_depth.clone();
             let history = self.history.clone();
             let mut alert_manager = alert_manager;
             let mut latest_save_ts = 0_u64;
@@ -424,9 +543,14 @@ impl StatsMgr {
             let mut latest_alert_check_ts = 0_u64;
             move || loop {
                 thread::sleep(Duration::from_millis(500));
+                let timer_cycle_started = Instant::now();
 
                 let mut resp = StatsResp::new();
                 let now = resp.updated;
+                let ingress_received = last_report_received
+                    .lock()
+                    .map(|received| received.clone())
+                    .unwrap_or_default();
 
                 // group gc
                 if latest_group_gc + cfg.group_gc < now {
@@ -443,9 +567,29 @@ impl StatsMgr {
                             should_keep_runtime_host(&cfg.hosts_map, name, o.latest_ts, now, cfg.group_gc)
                         });
                     }
+                    if let Ok(mut received) = last_report_received.lock() {
+                        received.retain(|name, latest_ts| {
+                            should_keep_runtime_host(&cfg.hosts_map, name, *latest_ts, now, cfg.group_gc)
+                        });
+                    }
                 }
 
+                // Resource evaluation may read/write SQLite alert state. Keep
+                // it outside the global host-state lock so incoming reports
+                // can update liveness while alerts are being evaluated.
+                let mut pending_custom_checks = Vec::new();
+                let state_lock_started = Instant::now();
                 if let Ok(mut host_stat_map) = stat_map.lock() {
+                    let state_lock_wait_ms = state_lock_started.elapsed().as_millis();
+                    if state_lock_wait_ms >= BOTTLENECK_WARN_MS
+                        && bottleneck_warning_allowed(&STATE_LOCK_WARNED_AT)
+                    {
+                        warn!(
+                            "stats state lock contention source=timer wait_ms={} threshold_ms={}",
+                            state_lock_wait_ms,
+                            BOTTLENECK_WARN_MS
+                        );
+                    }
                     for (_, stat) in host_stat_map.iter_mut() {
                         if stat.disabled {
                             resp.servers.push(Arc::clone(stat));
@@ -455,8 +599,9 @@ impl StatsMgr {
                         let notify_event = {
                             let o = Arc::make_mut(stat);
                             // 30s 下线
-                            let previous_latest_ts = o.latest_ts;
-                            if o.latest_ts + cfg.offline_threshold < now {
+                            let previous_latest_ts =
+                                effective_last_received(o.latest_ts, ingress_received.get(&o.name).copied());
+                            if is_report_offline(previous_latest_ts, now, cfg.offline_threshold) {
                                 became_offline = o.online4 || o.online6;
                                 if became_offline && cfg.alerts.offline_log {
                                     info!(
@@ -536,62 +681,9 @@ impl StatsMgr {
                             }
                         }
 
-                        // Client notify — Arc::clone is O(1), no HostStat copy.
-                        // A resource recovery is a distinct event from the
-                        // regular Custom event, so a recovery notification is
-                        // emitted once even though the metric is no longer
-                        // above its trigger threshold.
                         if let Some(event) = notify_event {
-                            let mut deliveries = Vec::new();
                             if matches!(&event, Event::Custom) {
-                                match alert_manager.as_mut() {
-                                    Some(manager) => {
-                                        let evaluation = manager.evaluate_custom(stat, now);
-                                        if !evaluation.recovered.is_empty() {
-                                            let mut route_keys = evaluation
-                                                .recovered
-                                                .iter()
-                                                .map(|item| recovery_route_key(&item.alert_type))
-                                                .collect::<Vec<_>>();
-                                            route_keys.push("alert_recovered".to_string());
-                                            deliveries.push((
-                                                Event::AlertRecovered,
-                                                AlertDispatch {
-                                                    route_keys,
-                                                    recovered: evaluation.recovered,
-                                                    ..AlertDispatch::default()
-                                                },
-                                            ));
-                                        }
-                                        if evaluation.should_send {
-                                            let route_keys = if evaluation.firing.is_empty() {
-                                                vec!["custom".to_string()]
-                                            } else {
-                                                evaluation
-                                                    .firing
-                                                    .iter()
-                                                    .map(|item| item.alert_type.clone())
-                                                    .collect()
-                                            };
-                                            deliveries.push((
-                                                Event::Custom,
-                                                AlertDispatch {
-                                                    route_keys,
-                                                    firing: evaluation.firing,
-                                                    suppressed_rule_ids: evaluation.suppressed_rule_ids,
-                                                    ..AlertDispatch::default()
-                                                },
-                                            ));
-                                        }
-                                    }
-                                    None => deliveries.push((
-                                        event,
-                                        AlertDispatch {
-                                            route_keys: vec!["custom".to_string()],
-                                            ..AlertDispatch::default()
-                                        },
-                                    )),
-                                }
+                                pending_custom_checks.push(Arc::clone(stat));
                             } else {
                                 let route_key = match event {
                                     Event::NodeUp => "node_up",
@@ -599,28 +691,30 @@ impl StatsMgr {
                                     Event::Custom => "custom",
                                     Event::AlertRecovered => "alert_recovered",
                                 };
-                                deliveries.push((
-                                    event,
+                                info!(
+                                    "alert event detected event={event:?} host={} gid={}",
+                                    stat.name,
+                                    stat.gid
+                                );
+                                let send_result = enqueue_notification(
+                                    &notifier_tx,
+                                    &notifier_queue_depth,
+                                    "timer",
+                                    event.clone(),
+                                    Arc::clone(stat),
                                     AlertDispatch {
                                         route_keys: vec![route_key.to_string()],
                                         ..AlertDispatch::default()
                                     },
-                                ));
-                            }
-                            for (delivery_event, dispatch) in deliveries {
-                                info!(
-                                    "alert event detected event={delivery_event:?} host={} gid={}",
-                                    stat.name,
-                                    stat.gid
                                 );
-                                if let Err(error) = notifier_tx.send((delivery_event.clone(), Arc::clone(stat), dispatch)) {
+                                if let Err(error) = send_result {
                                     error!(
-                                        "alert delivery queue_failed event={delivery_event:?} host={} error={error}",
+                                        "alert delivery queue_failed event={event:?} host={} error={error}",
                                         stat.name
                                     );
                                 } else {
                                     info!(
-                                        "alert delivery queue=accepted event={delivery_event:?} host={}",
+                                        "alert delivery queue=accepted event={event:?} host={}",
                                         stat.name
                                     );
                                 }
@@ -628,6 +722,83 @@ impl StatsMgr {
                         }
 
                         resp.servers.push(Arc::clone(stat));
+                    }
+                }
+
+                for stat in pending_custom_checks {
+                    let mut deliveries = Vec::new();
+                    match alert_manager.as_mut() {
+                        Some(manager) => {
+                            let evaluation = manager.evaluate_custom(&stat, now);
+                            if !evaluation.recovered.is_empty() {
+                                let mut route_keys = evaluation
+                                    .recovered
+                                    .iter()
+                                    .map(|item| recovery_route_key(&item.alert_type))
+                                    .collect::<Vec<_>>();
+                                route_keys.push("alert_recovered".to_string());
+                                deliveries.push((
+                                    Event::AlertRecovered,
+                                    AlertDispatch {
+                                        route_keys,
+                                        recovered: evaluation.recovered,
+                                        ..AlertDispatch::default()
+                                    },
+                                ));
+                            }
+                            if evaluation.should_send {
+                                let route_keys = if evaluation.firing.is_empty() {
+                                    vec!["custom".to_string()]
+                                } else {
+                                    evaluation
+                                        .firing
+                                        .iter()
+                                        .map(|item| item.alert_type.clone())
+                                        .collect()
+                                };
+                                deliveries.push((
+                                    Event::Custom,
+                                    AlertDispatch {
+                                        route_keys,
+                                        firing: evaluation.firing,
+                                        suppressed_rule_ids: evaluation.suppressed_rule_ids,
+                                        ..AlertDispatch::default()
+                                    },
+                                ));
+                            }
+                        }
+                        None => deliveries.push((
+                            Event::Custom,
+                            AlertDispatch {
+                                route_keys: vec!["custom".to_string()],
+                                ..AlertDispatch::default()
+                            },
+                        )),
+                    }
+                    for (delivery_event, dispatch) in deliveries {
+                        info!(
+                            "alert event detected event={delivery_event:?} host={} gid={}",
+                            stat.name, stat.gid
+                        );
+                        let send_result = enqueue_notification(
+                            &notifier_tx,
+                            &notifier_queue_depth,
+                            "timer",
+                            delivery_event.clone(),
+                            Arc::clone(&stat),
+                            dispatch,
+                        );
+                        if let Err(error) = send_result {
+                            error!(
+                                "alert delivery queue_failed event={delivery_event:?} host={} error={error}",
+                                stat.name
+                            );
+                        } else {
+                            info!(
+                                "alert delivery queue=accepted event={delivery_event:?} host={}",
+                                stat.name
+                            );
+                        }
                     }
                 }
 
@@ -662,12 +833,25 @@ impl StatsMgr {
                 if let Ok(mut o) = stats_data.lock() {
                     *o = resp;
                 }
+
+                let timer_cycle_ms = timer_cycle_started.elapsed().as_millis();
+                if timer_cycle_ms >= BOTTLENECK_WARN_MS
+                    && bottleneck_warning_allowed(&TIMER_CYCLE_WARNED_AT)
+                {
+                    warn!(
+                        "stats timer cycle slow duration_ms={} threshold_ms={} host_count={}",
+                        timer_cycle_ms,
+                        BOTTLENECK_WARN_MS,
+                        stats_data.lock().map(|data| data.servers.len()).unwrap_or_default()
+                    );
+                }
             }
         });
 
         // notify thread
         thread::spawn(move || loop {
             while let Ok(msg) = notifier_rx.recv() {
+                notifier_queue_depth.fetch_sub(1, Ordering::Relaxed);
                 let (e, stat, dispatch) = msg;
                 let notify_list = &*notifies.lock().unwrap();
                 trace!("recv notify => {e:?}, {stat:?}");
@@ -813,14 +997,34 @@ impl StatsMgr {
         // statistics worker and does not alter the Agent wire protocol.
         if let Some(object) = data.as_object_mut() {
             let received_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let received_at_ms = unix_now_ms();
             object.insert("_received_ts".to_string(), serde_json::json!(received_at));
+            object.insert("_received_ts_ms".to_string(), serde_json::json!(received_at_ms));
         }
-        match serde_json::from_value(data) {
+        match serde_json::from_value::<HostStat>(data) {
             Ok(stat) => {
+                let report_host = stat.name.clone();
+                let received_at = stat.received_ts.unwrap_or_else(|| unix_now_ms() / 1_000);
+                if let Ok(mut last_report_received) = self.last_report_received.lock() {
+                    last_report_received.insert(report_host.clone(), received_at);
+                }
                 trace!("send stat => {stat:?} ");
-                SENDER
-                    .send(Cow::Owned(stat))
-                    .map_err(|error| anyhow::anyhow!("stat queue is unavailable: {error}"))?;
+                match SENDER.try_send(Cow::Owned(stat)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        if bottleneck_warning_allowed(&REPORT_QUEUE_FULL_WARNED_AT) {
+                            warn!(
+                                "report queue full host={} capacity={} action=drop_metrics_keep_liveness warning_interval_ms={}",
+                                report_host, REPORT_QUEUE_CAPACITY, BOTTLENECK_WARN_INTERVAL_MS
+                            );
+                        }
+                        anyhow::bail!("stat queue is full");
+                    }
+                    Err(TrySendError::Disconnected(_)) => {
+                        error!("report queue unavailable host={} reason=disconnected", report_host);
+                        anyhow::bail!("stat queue is unavailable");
+                    }
+                }
             }
             Err(err) => {
                 error!("report error => {err:?}");
@@ -1165,5 +1369,57 @@ mod host_query_tests {
         assert!(!should_notify_up(50, 100, true, 30, false));
         assert!(should_notify_up(50, 100, true, 30, true));
         assert!(!should_notify_up(50, 100, false, 30, true));
+    }
+
+    #[test]
+    fn ingress_report_prevents_false_offline_while_worker_is_delayed() {
+        let processed_at = 100;
+        let ingress_at = 129;
+        let effective = effective_last_received(processed_at, Some(ingress_at));
+        assert_eq!(effective, ingress_at);
+        assert!(!is_report_offline(effective, 131, 30));
+        assert!(is_report_offline(effective, 160, 30));
+    }
+
+    #[test]
+    fn processed_timestamp_remains_fallback_for_legacy_state() {
+        assert_eq!(effective_last_received(100, None), 100);
+        assert_eq!(effective_last_received(100, Some(90)), 100);
+        assert!(is_report_offline(100, 131, 30));
+        assert!(!is_report_offline(100, 130, 30));
+    }
+
+    #[test]
+    fn notifier_queue_depth_is_reverted_when_receiver_is_gone() {
+        let (sender, receiver) = channel();
+        let depth = AtomicUsize::new(0);
+        let host = stat("node-1", "", &[]);
+        assert_eq!(
+            enqueue_notification(
+                &sender,
+                &depth,
+                "test",
+                Event::NodeDown,
+                Arc::clone(&host),
+                AlertDispatch::default(),
+            )
+            .unwrap(),
+            1
+        );
+        let _ = receiver.recv().unwrap();
+        depth.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
+
+        drop(receiver);
+        assert!(enqueue_notification(
+            &sender,
+            &depth,
+            "test",
+            Event::NodeDown,
+            host,
+            AlertDispatch::default(),
+        )
+        .is_err());
+        assert_eq!(depth.load(Ordering::Relaxed), 0);
     }
 }
