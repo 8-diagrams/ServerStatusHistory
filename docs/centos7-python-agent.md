@@ -347,6 +347,24 @@ Agent 参数增加：
 --vnstat
 ```
 
+### HTTP 上报超时与 520/5xx 排查
+
+当前 Python Agent 将单次 HTTP 上报的总墙钟时间限制为 8 秒：连接超时 3 秒、读取超时 5 秒；CentOS/Linux 另外使用 `SIGALRM` 强制执行 8 秒总截止时间。请求超时或 HTTP 4xx/5xx 后会关闭旧 Session，等待 3～6 秒并重新连接，避免一次 Cloudflare 520 或卡住的连接让整个采集循环停止几十秒。
+
+正常响应日志示例：
+
+```text
+report status=200 elapsed=0.842s cf_ray=...
+```
+
+超时日志示例：
+
+```text
+report timeout: report request exceeded 8.0s total timeout
+```
+
+Agent 还会上报 `latest_ts` 客户端采样时间；新版服务端会将它记录为 `agent_ts`，用于区分客户端采集停顿、网络传输延迟和服务端内部排队。旧版服务端会忽略这个兼容字段，不影响认证和指标上报。
+
 ## 10. 更新 Agent
 
 ```bash

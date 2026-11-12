@@ -16,6 +16,7 @@ import shlex
 import errno
 import timeit
 import socket
+import signal
 import psutil
 import hashlib
 import threading
@@ -36,6 +37,10 @@ IFACE_IGNORE_LIST = ["lo", "tun", "docker",
 PROBE_PROTOCOL_PREFER = 'ipv4'
 PING_PACKET_HISTORY_LEN = 100
 INTERVAL = 1
+REPORT_CONNECT_TIMEOUT = 3.0
+REPORT_READ_TIMEOUT = 5.0
+REPORT_TOTAL_TIMEOUT = 8.0
+REPORT_RETRY_DELAY = 3.0
 G_IP_INFO = None
 G_SYS_INFO = None
 
@@ -363,6 +368,48 @@ def get_target_network(url):
     return ipv4, ipv6
 
 
+class ReportTimeout(Exception):
+    """Raised when a report request exceeds the wall-clock deadline."""
+
+
+def _report_timeout_handler(signum, frame):
+    raise ReportTimeout(
+        "report request exceeded {:.1f}s total timeout".format(REPORT_TOTAL_TIMEOUT)
+    )
+
+
+def post_report(session, url, auth, payload, headers):
+    """POST one report with both socket and total wall-clock timeouts.
+
+    Requests' read timeout applies to individual socket reads and therefore
+    does not strictly cap a response that keeps sending small chunks. On
+    POSIX agents, SIGALRM supplies the hard 8-second wall-clock deadline. On
+    platforms without SIGALRM, the connect/read timeout tuple remains the
+    portable fallback.
+    """
+    timeout_handler_installed = (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+    previous_handler = None
+    if timeout_handler_installed:
+        previous_handler = signal.signal(signal.SIGALRM, _report_timeout_handler)
+        signal.setitimer(signal.ITIMER_REAL, REPORT_TOTAL_TIMEOUT)
+    try:
+        return session.post(
+            url,
+            auth=auth,
+            json=payload,
+            headers=headers,
+            timeout=(REPORT_CONNECT_TIMEOUT, REPORT_READ_TIMEOUT),
+        )
+    finally:
+        if timeout_handler_installed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+
 def http_report(options, stat_base):
     socket.setdefaulttimeout(5)
     start_rt_collect_t(options)
@@ -388,18 +435,45 @@ def http_report(options, stat_base):
     auth = HTTPBasicAuth(auth_user, options.password)
     print(http_headers, auth)
     sess = requests.Session()
+    retry_delay = 0
     while True:
         try:
             stat_data = sample(options, stat_base)
+            # The server preserves this legacy field internally as the Agent
+            # event timestamp. It does not change the wire schema for old
+            # servers and makes delayed Python reports diagnosable.
+            stat_data['latest_ts'] = int(time.time())
             print(json.dumps(stat_data))
-            r = sess.post(options.addr, auth=auth,
-                          json=stat_data, headers=http_headers)
-            print(r)
+            request_started = time.monotonic()
+            r = post_report(sess, options.addr, auth, stat_data, http_headers)
+            elapsed = time.monotonic() - request_started
+            print(
+                "report status={} elapsed={:.3f}s cf_ray={}".format(
+                    r.status_code, elapsed, r.headers.get("cf-ray", "-")
+                )
+            )
+            if r.status_code >= 400:
+                r.raise_for_status()
+            r.close()
+            retry_delay = 0
         except KeyboardInterrupt:
             raise
-        except Exception as ex:
+        except ReportTimeout as ex:
+            print("report timeout: {}".format(ex), file=sys.stderr)
             traceback.print_exc()
-            time.sleep(3)
+            retry_delay = REPORT_RETRY_DELAY
+            sess.close()
+            sess = requests.Session()
+            time.sleep(retry_delay)
+        except Exception as ex:
+            print("report failed: {}".format(ex), file=sys.stderr)
+            traceback.print_exc()
+            retry_delay = min(
+                REPORT_RETRY_DELAY * 2,
+                retry_delay * 2 if retry_delay else REPORT_RETRY_DELAY,
+            )
+            time.sleep(retry_delay)
+            sess.close()
             sess = requests.Session()
 
 
