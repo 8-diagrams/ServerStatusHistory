@@ -106,7 +106,7 @@
           {{ t('loadingHosts') }}
         </div>
         <Transition v-else name="popup-bottom">
-          <div class="space-y-6">
+          <div v-show="!loading && !loadingView" class="space-y-6">
             <section v-for="group in serverGroups" :key="group.key">
               <div v-if="group.label" class="mb-3 flex items-center gap-2">
                 <h3 class="text-lg font-bold">

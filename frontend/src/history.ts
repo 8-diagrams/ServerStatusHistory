@@ -23,7 +23,25 @@ export interface MetricOption {
   historyValue: (values: Record<string, number>) => number | undefined
 }
 
-interface HistoryResponse { series?: Record<string, Array<[number, number]>> }
+interface HistoryResponse {
+  from?: number
+  to?: number
+  step?: number
+  resolution?: string
+  series?: Record<string, Array<[number, number]>>
+}
+
+export interface HistoryLoadMeta {
+  from: number
+  to: number
+  step: number
+  resolution: string
+}
+
+export interface MetricsHistoryResult {
+  histories: Record<MetricKey, ChartPoint[]>
+  meta?: HistoryLoadMeta
+}
 interface StoredSnapshot {
   host: string
   ts: number
@@ -159,6 +177,7 @@ const options = new Map(METRIC_OPTIONS.map(option => [option.key, option]))
 const memory = new Map<string, Map<MetricKey, Map<number, number>>>()
 const pendingLoads = new Map<string, Promise<ChartPoint[]>>()
 const pendingBatchLoads = new Map<string, Promise<Record<MetricKey, ChartPoint[]>>>()
+const pendingRangeLoads = new Map<string, Promise<MetricsHistoryResult>>()
 const previousNetworkCounters = new Map<string, { incoming: number; outgoing: number; ts: number }>()
 const lastPersisted = new Map<string, number>()
 const loadedFrom = new Map<string, number>()
@@ -400,9 +419,9 @@ async function fetchServerHistory(host: string, gid: string | undefined, option:
   })
 }
 
-function toChartPoints(host: string, metric: MetricKey, from: number) {
+function toChartPoints(host: string, metric: MetricKey, from: number, to = Number.POSITIVE_INFINITY) {
   const visible = [...metricPoints(host, metric).entries()]
-    .filter(([ts]) => ts >= from)
+    .filter(([ts]) => ts >= from && ts <= to)
     .sort(([left], [right]) => left - right)
   const stride = Math.max(1, Math.ceil(visible.length / MAX_CHART_POINTS))
   return visible
@@ -453,6 +472,20 @@ export function appendLiveMetrics(server: ServerData, fallbackTimestamp: number)
 
 export function localMetricHistory(host: string, metric: MetricKey, rangeSeconds: number, gid?: string) {
   return toChartPoints(historyHostKey(host, gid), metric, Math.floor(Date.now() / 1000) - rangeSeconds)
+}
+
+export function localMetricsHistoryRange(
+  host: string,
+  metrics: MetricKey[],
+  from: number,
+  to: number,
+  gid?: string,
+) {
+  const hostKey = historyHostKey(host, gid)
+  return Object.fromEntries([...new Set(metrics)].map(metric => [
+    metric,
+    toChartPoints(hostKey, metric, from, to),
+  ])) as Record<MetricKey, ChartPoint[]>
 }
 
 export function ensureMetricHistory(host: string, metric: MetricKey, rangeSeconds: number, gid?: string) {
@@ -518,7 +551,7 @@ async function fetchServerHistories(
   from: number,
   to: number,
   step: number,
-) {
+): Promise<{ histories: Map<MetricKey, Array<[number, number]>>; meta?: HistoryLoadMeta }> {
   const dependencies = [...new Set(requested.flatMap(option => option.dependencies))]
   const query = new URLSearchParams({
     host,
@@ -526,12 +559,13 @@ async function fetchServerHistories(
     to: String(to),
     step: String(step),
     metrics: dependencies.join(','),
+    max_points: String(MAX_CHART_POINTS),
   })
   if (gid !== undefined)
     query.set('gid', gid)
   const response = await fetch(`${HISTORY_API}?${query}`)
   if (!response.ok)
-    return new Map<MetricKey, Array<[number, number]>>()
+    return { histories: new Map<MetricKey, Array<[number, number]>>() }
   const data = await response.json() as HistoryResponse
   const valuesByTimestamp = new Map<number, Record<string, number>>()
   for (const dependency of dependencies) {
@@ -549,7 +583,17 @@ async function fetchServerHistories(
     })
     result.set(option.key, values)
   }
-  return result
+  return {
+    histories: result,
+    meta: typeof data.from === 'number' && typeof data.to === 'number' && typeof data.step === 'number'
+      ? {
+          from: data.from,
+          to: data.to,
+          step: data.step,
+          resolution: data.resolution || 'unknown',
+        }
+      : undefined,
+  }
 }
 
 /** Load several chart series with one history request per missing time span. */
@@ -580,8 +624,8 @@ export function ensureMetricsHistory(host: string, metrics: MetricKey[], rangeSe
     const snapshots = new Map<number, Partial<Record<MetricKey, number>>>()
     for (const [gapFrom, gapTo] of ranges) {
       try {
-        const histories = await fetchServerHistories(host, gid, requested, gapFrom, gapTo, step)
-        for (const [metric, points] of histories) {
+        const result = await fetchServerHistories(host, gid, requested, gapFrom, gapTo, step)
+        for (const [metric, points] of result.histories) {
           const target = metricPoints(hostKey, metric)
           for (const [ts, value] of points) {
             if (!target.has(ts))
@@ -604,5 +648,73 @@ export function ensureMetricsHistory(host: string, metrics: MetricKey[], rangeSe
   })().finally(() => pendingBatchLoads.delete(key))
 
   pendingBatchLoads.set(key, promise)
+  return promise
+}
+
+/**
+ * Load one explicit historical interval. The server chooses the appropriate
+ * SQLite rollup tier for the interval's age; the returned metadata describes
+ * the actual resolution used. Local browser samples are retained as a
+ * fallback when the history endpoint is unavailable.
+ */
+export function ensureMetricsHistoryRange(
+  host: string,
+  metrics: MetricKey[],
+  from: number,
+  to: number,
+  gid?: string,
+): Promise<MetricsHistoryResult> {
+  const uniqueMetrics = [...new Set(metrics)]
+  const hostKey = historyHostKey(host, gid)
+  const rangeSeconds = Math.max(1, to - from)
+  const key = `${hostKey}:${uniqueMetrics.slice().sort().join(',')}:${from}:${to}`
+  const rangeExisting = pendingRangeLoads.get(key)
+  if (rangeExisting)
+    return rangeExisting
+
+  const promise = (async () => {
+    // Explicit intervals may be visited out of chronological order, so a
+    // single "oldest loaded" marker is not sufficient here. IndexedDB reads
+    // are deduplicated by the in-memory timestamp maps.
+    restoreSnapshots(hostKey, await readSnapshots(hostKey, from, to))
+
+    const requested = uniqueMetrics.map(metricOption)
+    let meta: HistoryLoadMeta | undefined
+    const snapshots = new Map<number, Partial<Record<MetricKey, number>>>()
+    try {
+      const result = await fetchServerHistories(host, gid, requested, from, to, responseStep(rangeSeconds))
+      meta = result.meta
+      for (const [metric, points] of result.histories) {
+        const target = metricPoints(hostKey, metric)
+        // Prefer a complete server interval over stale/local samples at the
+        // same timestamps. If the server has no series, local samples remain.
+        if (points.length > 0) {
+          for (const timestamp of [...target.keys()]) {
+            if (timestamp >= from && timestamp <= to)
+              target.delete(timestamp)
+          }
+        }
+        for (const [timestamp, value] of points) {
+          target.set(timestamp, value)
+          const values = snapshots.get(timestamp) || {}
+          values[metric] = value
+          snapshots.set(timestamp, values)
+        }
+      }
+    }
+    catch {
+      // Keep local IndexedDB and live browser samples available.
+    }
+    await writeSnapshots([...snapshots].map(([ts, values]) => ({ host: hostKey, ts, values })))
+    return {
+      histories: Object.fromEntries(uniqueMetrics.map(metric => [
+        metric,
+        toChartPoints(hostKey, metric, from, to),
+      ])) as Record<MetricKey, ChartPoint[]>,
+      meta,
+    }
+  })().finally(() => pendingRangeLoads.delete(key))
+
+  pendingRangeLoads.set(key, promise)
   return promise
 }
