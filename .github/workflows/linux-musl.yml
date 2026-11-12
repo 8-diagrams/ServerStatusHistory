@@ -79,11 +79,8 @@ jobs:
           name: web-assets
           path: web
 
-      - name: Install build dependencies
-        run: |
-          apt-get update -y -qq
-          apt-get install -y -qq protobuf-compiler zip file llvm git
-
+      # common/build.rs uses protobuf-src to provide protoc; do not depend on
+      # the container's Ubuntu APT/DNS for protobuf or zip.
       - name: Verify container Rust toolchain
         run: |
           rustc --version
@@ -100,7 +97,6 @@ jobs:
 
       - name: Inspect binary
         run: |
-          file "target/${{ matrix.target }}/release/stat_server"
           ls -lh "target/${{ matrix.target }}/release/stat_server"
 
       - name: Strip binary
@@ -108,15 +104,16 @@ jobs:
         run: llvm-strip "target/${{ matrix.target }}/release/stat_server"
 
       - name: Package
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/stat_server" dist/
-          cp config.toml dist/
-          cp systemd/stat_server.service dist/
-          cp scripts/deploy-server.sh dist/
-          chmod +x dist/deploy-server.sh
-          cd dist
-          zip -r "../stat_server-${{ matrix.target }}.zip" .
+        uses: TheDoctor0/zip-release@0.7.6
+        with:
+          type: zip
+          filename: stat_server-${{ matrix.target }}.zip
+          directory: ./
+          path: |
+            target/${{ matrix.target }}/release/stat_server
+            config.toml
+            systemd/stat_server.service
+            scripts/deploy-server.sh
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

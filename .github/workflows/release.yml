@@ -78,12 +78,9 @@ jobs:
       image: docker://ghcr.io/rust-cross/rust-musl-cross:${{ matrix.platform.target }}
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Protoc & Utils
-        run: |
-          apt-get update -y -qq
-          apt-get install -y -qq protobuf-compiler zip git llvm
 
+      # common/build.rs uses protobuf-src to provide protoc; packaging uses
+      # zip-release below, so this container needs no APT network access.
       - name: Verify container Rust toolchain
         run: |
           rustc --version
@@ -147,14 +144,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Protoc
-        run: |
-          if [ "${{ matrix.platform.os }}" = "windows-latest" ]; then
-            choco install protoc --no-progress
-          else
-            sudo apt-get update && sudo apt-get install -y protobuf-compiler
-          fi
-        shell: bash
+      # Linux cross builds use protobuf-src from common/build.rs. Windows
+      # host builds use the native protoc package instead.
+      - name: Install Protoc (Windows)
+        if: matrix.platform.os == 'windows-latest'
+        run: choco install protoc --no-progress
 
       - uses: dtolnay/rust-toolchain@stable
         with:
