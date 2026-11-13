@@ -16,13 +16,19 @@ import shlex
 import errno
 import timeit
 import socket
-import signal
 import psutil
 import hashlib
 import threading
 import subprocess
 import requests
 import traceback
+try:
+    # requests ships urllib3 and its Timeout object supports a real total
+    # deadline.  Using it avoids SIGALRM interrupting an in-flight request
+    # halfway through its body, which can surface at Nginx as 400/499.
+    from urllib3.util import Timeout as Urllib3Timeout
+except ImportError:
+    Urllib3Timeout = None
 from queue import Queue
 from datetime import datetime
 from requests.auth import HTTPBasicAuth
@@ -368,46 +374,53 @@ def get_target_network(url):
     return ipv4, ipv6
 
 
-class ReportTimeout(Exception):
-    """Raised when a report request exceeds the wall-clock deadline."""
+def post_report(
+    session,
+    url,
+    auth,
+    payload,
+    headers,
+    connect_timeout=REPORT_CONNECT_TIMEOUT,
+    read_timeout=REPORT_READ_TIMEOUT,
+    total_timeout=REPORT_TOTAL_TIMEOUT,
+):
+    """POST one report with connect, read, and total wall-clock deadlines.
 
-
-def _report_timeout_handler(signum, frame):
-    raise ReportTimeout(
-        "report request exceeded {:.1f}s total timeout".format(REPORT_TOTAL_TIMEOUT)
-    )
-
-
-def post_report(session, url, auth, payload, headers):
-    """POST one report with both socket and total wall-clock timeouts.
-
-    Requests' read timeout applies to individual socket reads and therefore
-    does not strictly cap a response that keeps sending small chunks. On
-    POSIX agents, SIGALRM supplies the hard 8-second wall-clock deadline. On
-    platforms without SIGALRM, the connect/read timeout tuple remains the
-    portable fallback.
+    The previous implementation used SIGALRM to enforce the total timeout.
+    That signal can arrive while requests is still writing a request body;
+    closing the session at that point leaves an incomplete HTTP request at a
+    proxy, which is observed as Nginx 400/499. urllib3's Timeout object keeps
+    the deadline inside the HTTP adapter and lets it cleanly tear down the
+    request instead. The JSON wire format is unchanged.
     """
-    timeout_handler_installed = (
-        hasattr(signal, "SIGALRM")
-        and hasattr(signal, "setitimer")
-        and threading.current_thread() is threading.main_thread()
-    )
-    previous_handler = None
-    if timeout_handler_installed:
-        previous_handler = signal.signal(signal.SIGALRM, _report_timeout_handler)
-        signal.setitimer(signal.ITIMER_REAL, REPORT_TOTAL_TIMEOUT)
-    try:
-        return session.post(
-            url,
-            auth=auth,
-            json=payload,
-            headers=headers,
-            timeout=(REPORT_CONNECT_TIMEOUT, REPORT_READ_TIMEOUT),
+    if Urllib3Timeout is not None:
+        timeout = Urllib3Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            total=total_timeout,
         )
-    finally:
-        if timeout_handler_installed:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
+    else:
+        # Compatibility fallback for unusually old requests/urllib3 builds.
+        timeout = (
+            min(connect_timeout, total_timeout),
+            min(read_timeout, total_timeout),
+        )
+    return session.post(
+        url,
+        auth=auth,
+        json=payload,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
+def reset_report_session(session):
+    """Close the failed pool and return a completely new HTTP session."""
+    try:
+        session.close()
+    except Exception as ex:
+        print("report session close failed: {!r}".format(str(ex)), file=sys.stderr)
+    return requests.Session()
 
 
 def http_report(options, stat_base):
@@ -434,9 +447,20 @@ def http_report(options, stat_base):
     http_headers = {"ssr-auth": ssr_auth}
     auth = HTTPBasicAuth(auth_user, options.password)
     print(http_headers, auth)
+    print(
+        "report transport connect_timeout={:.1f}s read_timeout={:.1f}s "
+        "total_timeout={:.1f}s retry_delay={:.1f}s "
+        "reset_session_on_failure=true".format(
+            options.report_connect_timeout,
+            options.report_read_timeout,
+            options.report_total_timeout,
+            REPORT_RETRY_DELAY,
+        )
+    )
     sess = requests.Session()
     retry_delay = 0
     while True:
+        request_started = None
         try:
             stat_data = sample(options, stat_base)
             # The server preserves this legacy field internally as the Agent
@@ -445,36 +469,57 @@ def http_report(options, stat_base):
             stat_data['latest_ts'] = int(time.time())
             print(json.dumps(stat_data))
             request_started = time.monotonic()
-            r = post_report(sess, options.addr, auth, stat_data, http_headers)
+            r = post_report(
+                sess,
+                options.addr,
+                auth,
+                stat_data,
+                http_headers,
+                connect_timeout=options.report_connect_timeout,
+                read_timeout=options.report_read_timeout,
+                total_timeout=options.report_total_timeout,
+            )
             elapsed = time.monotonic() - request_started
             print(
                 "report status={} elapsed={:.3f}s cf_ray={}".format(
                     r.status_code, elapsed, r.headers.get("cf-ray", "-")
                 )
             )
-            if r.status_code >= 400:
-                r.raise_for_status()
-            r.close()
+            try:
+                if r.status_code >= 400:
+                    r.raise_for_status()
+            finally:
+                r.close()
             retry_delay = 0
         except KeyboardInterrupt:
             raise
-        except ReportTimeout as ex:
-            print("report timeout: {}".format(ex), file=sys.stderr)
-            traceback.print_exc()
-            retry_delay = REPORT_RETRY_DELAY
-            sess.close()
-            sess = requests.Session()
-            time.sleep(retry_delay)
         except Exception as ex:
-            print("report failed: {}".format(ex), file=sys.stderr)
+            elapsed = (
+                time.monotonic() - request_started
+                if request_started is not None
+                else 0.0
+            )
+            response = getattr(ex, "response", None)
+            response_status = getattr(response, "status_code", "-")
+            print(
+                "report failed type={} status={} elapsed={:.3f}s error={!r}".format(
+                    type(ex).__name__, response_status, elapsed, str(ex)
+                ),
+                file=sys.stderr,
+            )
             traceback.print_exc()
             retry_delay = min(
                 REPORT_RETRY_DELAY * 2,
                 retry_delay * 2 if retry_delay else REPORT_RETRY_DELAY,
             )
+            # Reset the pool before waiting. The next attempt must not reuse
+            # a connection, response, or cookie state from this failure.
+            sess = reset_report_session(sess)
+            print(
+                "report retry session reset next_delay={:.1f}s".format(retry_delay),
+                file=sys.stderr,
+            )
             time.sleep(retry_delay)
-            sess.close()
-            sess = requests.Session()
 
 
 IP_API_URL = "http://ip-api.com/json?fields=status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,isp,org,as,asname,query&lang=zh-CN"
@@ -618,14 +663,49 @@ def main():
                       help="exclude iface [default: %default]")
     parser.add_option("--interval", dest="interval",
                       default=1, help="report interval [default: %default]")
+    parser.add_option(
+        "--report-connect-timeout",
+        dest="report_connect_timeout",
+        type="float",
+        default=REPORT_CONNECT_TIMEOUT,
+        help="report connect timeout in seconds [default: %default]",
+    )
+    parser.add_option(
+        "--report-read-timeout",
+        dest="report_read_timeout",
+        type="float",
+        default=REPORT_READ_TIMEOUT,
+        help="report read timeout in seconds [default: %default]",
+    )
+    parser.add_option(
+        "--report-timeout",
+        "--report-total-timeout",
+        dest="report_total_timeout",
+        type="float",
+        default=REPORT_TOTAL_TIMEOUT,
+        help="report total timeout in seconds [default: %default]",
+    )
 
     (options, args) = parser.parse_args()
+
+    for option_name in (
+        "report_connect_timeout",
+        "report_read_timeout",
+        "report_total_timeout",
+    ):
+        if getattr(options, option_name) <= 0:
+            parser.error("--{} must be greater than 0".format(
+                option_name.replace("_", "-")
+            ))
 
     def parse_iface_list(ifaces): return list(
         filter(lambda s: len(s), map(str.strip, ifaces.split(","))))
     options.iface = parse_iface_list(options.iface)
     options.exclude_iface = parse_iface_list(options.exclude_iface)
-    print(json.dumps(options.__dict__, indent=2))
+    logged_options = dict(options.__dict__)
+    if logged_options.get("password"):
+        logged_options["password"] = "***"
+    print(json.dumps(logged_options, indent=2))
 
     if options.vnstat:
         if sys.platform.startswith("win"):

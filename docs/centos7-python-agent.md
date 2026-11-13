@@ -161,10 +161,21 @@ cd /opt/ServerStatus
   -u "mwh-1" \
   -p "agent863" \
   --location us \
-  --type linux
+  --type linux \
+  --report-timeout 8
 ```
 
 Python Agent 本身就是 JSON HTTP 上报，不要添加 Rust Agent 的 `--json` 参数。正常时会持续输出采集指标，使用 `Ctrl+C` 停止测试。
+
+HTTP 上报的默认超时为：连接 3 秒、读取 5 秒、总耗时 8 秒。可以分别设置：
+
+```text
+--report-connect-timeout 3
+--report-read-timeout 5
+--report-timeout 8
+```
+
+`--report-timeout` 与 `--report-total-timeout` 是同一个参数。请求失败后，Agent 会先关闭旧 Session 和连接池、建立全新的 Session，再等待并重新采样、发起下一次 HTTP 请求；失败请求的连接、响应和 Cookie 状态不会被重试请求复用。
 
 ## 6. 配置 systemd
 
@@ -193,7 +204,8 @@ ExecStart=/opt/ServerStatus/.venv/bin/python -u /opt/ServerStatus/stat_client.py
   -u mwh-1 \
   -p agent863 \
   --location us \
-  --type linux
+  --type linux \
+  --report-timeout 8
 Restart=always
 RestartSec=10
 
@@ -349,7 +361,7 @@ Agent 参数增加：
 
 ### HTTP 上报超时与 520/5xx 排查
 
-当前 Python Agent 将单次 HTTP 上报的总墙钟时间限制为 8 秒：连接超时 3 秒、读取超时 5 秒；CentOS/Linux 另外使用 `SIGALRM` 强制执行 8 秒总截止时间。请求超时或 HTTP 4xx/5xx 后会关闭旧 Session，等待 3～6 秒并重新连接，避免一次 Cloudflare 520 或卡住的连接让整个采集循环停止几十秒。
+当前 Python Agent 默认将单次 HTTP 上报的总耗时限制为 8 秒：连接超时 3 秒、读取超时 5 秒，并由 requests/urllib3 的原生超时机制管理。请求超时或 HTTP 4xx/5xx 后会先关闭旧 Session 和连接池、创建新 Session，再等待 3～6 秒并重新采样和连接，避免一次 Cloudflare 520 或卡住的连接让整个采集循环停止几十秒。
 
 正常响应日志示例：
 
@@ -360,7 +372,14 @@ report status=200 elapsed=0.842s cf_ray=...
 超时日志示例：
 
 ```text
-report timeout: report request exceeded 8.0s total timeout
+report failed type=ReadTimeout status=- elapsed=5.012s error="..."
+report retry session reset next_delay=3.0s
+```
+
+启动日志会打印实际采用的连接、读取和总超时，便于确认 systemd 参数是否生效：
+
+```text
+report transport connect_timeout=3.0s read_timeout=5.0s total_timeout=8.0s retry_delay=3.0s reset_session_on_failure=true
 ```
 
 Agent 还会上报 `latest_ts` 客户端采样时间；新版服务端会将它记录为 `agent_ts`，用于区分客户端采集停顿、网络传输延迟和服务端内部排队。旧版服务端会忽略这个兼容字段，不影响认证和指标上报。
