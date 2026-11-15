@@ -5,20 +5,31 @@ set -euo pipefail
 
 detect_nginx_root() {
     local prefix=""
+    local conf=""
+
+    # 从 nginx -t 输出中提取配置文件路径
     if command -v nginx >/dev/null 2>&1; then
-        prefix=$(nginx -V 2>&1 | grep -oP -- '--prefix=\K[^ ]+' || true)
+        conf=$(nginx -t 2>&1 | grep -o '/etc/nginx/[^ ]*\.conf' | head -1 || true)
+        # 更通用的写法（不限定 /etc/nginx）
+        # conf=$(nginx -t 2>&1 | sed -n 's/.*configuration file \([^ ]*\).*/\1/p' | head -1 || true)
+
+        if [[ -n "$conf" && -f "$conf" ]]; then
+            prefix=$(dirname "$conf")
+        fi
     fi
-    if [[ -z "$prefix" ]]; then
-        local conf
-        conf=$(nginx -t 2>&1 | grep -oP 'configuration file \K[^ ]+' || true)
-        [[ -n "$conf" ]] && prefix=$(dirname "$conf")
-    fi
+
+    # 兜底：按常见路径查找
     if [[ -z "$prefix" ]]; then
         for p in /etc/nginx /usr/local/nginx /usr/local/etc/nginx; do
             [[ -f "$p/nginx.conf" ]] && { prefix="$p"; break; }
         done
     fi
-    [[ -z "$prefix" ]] && { echo "Cannot detect nginx root" >&2; exit 1; }
+
+    if [[ -z "$prefix" ]]; then
+        echo "Cannot detect nginx root" >&2
+        exit 1
+    fi
+
     echo "$prefix"
 }
 
