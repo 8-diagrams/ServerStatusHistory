@@ -450,6 +450,33 @@ pnpm build
 </details>
 
 ### 4.1 Rust 版 Client
+
+Linux x86_64/arm64 可以使用 `install-rust-agent.sh` 安装。脚本接受单独的 `stat_client`、本地 `ServerStatus-*.zip` 或 Release HTTPS 地址；不指定构建产物时会根据本机架构下载 `master` Release。认证信息保存到权限为 `0600` 的环境文件：
+
+```bash
+# 固定主机
+sudo ./install-rust-agent.sh \
+  --artifact https://github.com/8-diagrams/ServerStatusHistory/releases/download/master/ServerStatus-x86_64-unknown-linux-musl.zip \
+  -a https://st.example.com/report \
+  -u mwh-1 \
+  -p 'agent-password' \
+  -l us
+
+# 动态主机组
+sudo ./install-rust-agent.sh \
+  --artifact ./ServerStatus-x86_64-unknown-linux-musl.zip \
+  -a https://st.example.com/report \
+  -g mail \
+  -p 'group-password' \
+  --alias mail-01 \
+  -l us
+
+sudo systemctl status stat_client
+sudo journalctl -u stat_client -f
+```
+
+脚本默认安装到 `/opt/ServerStatus/stat_client`。如果它在源码仓库中运行且没有指定 `--artifact`，会先查找当前架构的 `target/<target>/release/stat_client`，找不到再下载相应的 x86_64 或 ARM64 Release。
+
 ```bash
 # 公网环境建议 headscale/nebula 组网或走 https, 使用 nginx 对 server 套 ssl 和自定义 location /report
 # alpine linux 需要安装相关命令 apk add procps iproute2 coreutils

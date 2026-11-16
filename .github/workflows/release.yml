@@ -106,6 +106,8 @@ jobs:
           cp "target/${{ matrix.platform.target }}/release/stat_server" dist/
           cp "target/${{ matrix.platform.target }}/release/stat_client" dist/
           cp config.toml dist/
+          cp client/install-rust-agent.sh dist/
+          chmod +x dist/install-rust-agent.sh
 
       - name: Upload Linux package files
         uses: actions/upload-artifact@v4
