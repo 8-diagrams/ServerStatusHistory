@@ -536,6 +536,109 @@ OPTIONS:
 -e, --exclude-iface # 排除指定网口，默认排除 "lo,docker,vnet,veth,vmbr,kube,br-"
 ```
 
+### 4.1.1 Windows 开机运行 Rust Agent
+
+Windows 一键安装脚本默认下载 `ServerStatus-x86_64-pc-windows-msvc.zip`，并安装到 `C:\ServerStatus`。如果使用最新 Release ZIP，包中也包含以下脚本：
+
+```text
+stat_client.exe
+run-rust-agent.ps1
+install-windows-agent.ps1
+agent-config.example.psd1
+```
+
+直接下载并以管理员身份运行安装脚本：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+Invoke-WebRequest `
+  -Uri 'https://raw.githubusercontent.com/8-diagrams/ServerStatusHistory/master/client/install-windows-agent.ps1' `
+  -OutFile "$env:TEMP\install-windows-agent.ps1"
+
+& "$env:TEMP\install-windows-agent.ps1" `
+  -AgentUser 'mwh-2' `
+  -AgentPassword 'agent-password' `
+  -AgentLocation 'us'
+```
+
+不提供 `-AgentPassword` 时，脚本会安全地交互式询问密码；已有 `C:\ProgramData\ServerStatus\agent-config.psd1` 时默认保留，不覆盖线上配置。
+
+如果不想把密码写入 PowerShell 历史记录，可以省略密码：
+
+```powershell
+& "$env:TEMP\install-windows-agent.ps1" `
+  -AgentUser 'mwh-2' `
+  -AgentLocation 'us'
+```
+
+固定主机配置示例：
+
+```powershell
+@{
+    Addr     = 'https://st.9888812.xyz/report'
+    User     = 'mwh-2'
+    Pass     = 'agent-password'
+    Location = 'us'
+    Type     = 'windows'
+    Interval = 1
+}
+```
+
+动态主机组使用：
+
+```powershell
+@{
+    Addr     = 'https://st.9888812.xyz/report'
+    User     = 'h1'
+    Pass     = 'group-password'
+    Gid      = 'mail'
+    Alias    = 'mail-de'
+    Location = 'DE'
+    Type     = 'windows'
+    Interval = 1
+}
+```
+
+动态主机组的一键安装：
+
+```powershell
+& "$env:TEMP\install-windows-agent.ps1" `
+  -AgentGid 'mail' `
+  -AgentPassword 'group-password' `
+  -AgentAlias 'mail-de' `
+  -AgentLocation 'DE'
+```
+
+如果希望强制重新生成配置，增加 `-ForceConfig`。脚本会创建名为 `ServerStatus Rust Agent` 的任务，以 `SYSTEM` 身份开机运行，并在 Agent 退出后自动重启。日志位于：
+
+```text
+C:\ProgramData\ServerStatus\stat_client.log
+```
+
+管理任务：
+
+```powershell
+Get-ScheduledTask -TaskName 'ServerStatus Rust Agent'
+Start-ScheduledTask -TaskName 'ServerStatus Rust Agent'
+Stop-ScheduledTask -TaskName 'ServerStatus Rust Agent'
+Unregister-ScheduledTask -TaskName 'ServerStatus Rust Agent' -Confirm:$false
+Get-Content C:\ProgramData\ServerStatus\stat_client.log -Wait
+```
+
+如果只想前台测试，不创建任务：
+
+```powershell
+cd C:\ServerStatus
+.\stat_client.exe `
+  --addr 'https://st.9888812.xyz/report' `
+  --user 'mwh-2' `
+  --pass 'agent-password' `
+  --location 'us' `
+  --type 'windows'
+```
+
+> `install-rust-agent.sh` 是 Linux/systemd 安装脚本，不能在 Windows PowerShell 中执行。
+
 ### 4.2 Python 版 Client
 
 <details>

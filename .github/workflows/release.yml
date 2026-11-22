@@ -213,6 +213,9 @@ jobs:
           cp target/${{ matrix.platform.target }}/release/stat_server${{matrix.platform.suffix}} ./assets/
           cp target/${{ matrix.platform.target }}/release/stat_client${{matrix.platform.suffix}} ./assets/
           cp config.toml ./assets/
+          cp client/run-rust-agent.ps1 ./assets/
+          cp client/install-windows-agent.ps1 ./assets/
+          cp client/agent-config.example.psd1 ./assets/
         shell: bash
 
       - name: Zip Release
