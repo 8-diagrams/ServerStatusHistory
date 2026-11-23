@@ -609,7 +609,7 @@ Invoke-WebRequest `
   -AgentLocation 'DE'
 ```
 
-如果希望强制重新生成配置，增加 `-ForceConfig`。脚本会创建名为 `ServerStatus Rust Agent` 的任务，以 `SYSTEM` 身份开机运行，并在 Agent 退出后自动重启。日志位于：
+如果希望强制重新生成配置，增加 `-ForceConfig`。脚本会创建名为 `ServerStatus Rust Agent` 的任务，以 `SYSTEM` 身份开机运行。Agent 启动脚本内部 10 秒重试；Windows 任务计划程序本身使用兼容性更好的 1 分钟重启间隔。日志位于：
 
 ```text
 C:\ProgramData\ServerStatus\stat_client.log

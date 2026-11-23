@@ -180,10 +180,12 @@ try {
         -UserId 'SYSTEM' `
         -LogonType ServiceAccount `
         -RunLevel Highest
+    # Windows Task Scheduler rejects PT10S on some versions; one minute
+    # is accepted broadly. The launcher itself retries after 10 seconds.
     $Settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -RestartCount 999 `
-        -RestartInterval (New-TimeSpan -Seconds 10)
+        -RestartInterval (New-TimeSpan -Minutes 1)
 
     Register-ScheduledTask `
         -TaskName $TaskName `
@@ -192,8 +194,9 @@ try {
         -Principal $Principal `
         -Settings $Settings `
         -Description 'ServerStatus Rust monitoring agent' `
-        -Force | Out-Null
-    Start-ScheduledTask -TaskName $TaskName
+        -Force `
+        -ErrorAction Stop | Out-Null
+    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
 
     Write-Host ''
     Write-Host "Installation complete: $InstallDir" -ForegroundColor Green
