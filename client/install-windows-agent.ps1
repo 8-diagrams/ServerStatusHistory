@@ -33,10 +33,10 @@ function Quote-Psd1([string]$Value) {
 }
 
 function Download-File([string]$Url, [string]$Destination) {
-    Write-Host "下载: $Url"
+    Write-Host "Downloading: $Url"
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
     if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
-        Fail "下载失败: $Url"
+        Fail "Download failed: $Url"
     }
 }
 
@@ -45,16 +45,16 @@ $CurrentPrincipal = [Security.Principal.WindowsPrincipal]::new(
 )
 if (-not $CurrentPrincipal.IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Fail '请使用管理员 PowerShell 运行此脚本。'
+    Fail 'Run this script from an elevated PowerShell window.'
 }
 
 $Architecture = $env:PROCESSOR_ARCHITEW6432
 if (-not $Architecture) { $Architecture = $env:PROCESSOR_ARCHITECTURE }
 if ($Architecture -ne 'AMD64') {
-    Fail "当前 Windows 架构为 $Architecture，当前 Release 仅提供 x86_64-pc-windows-msvc。"
+    Fail "Unsupported Windows architecture: $Architecture. This release provides x86_64-pc-windows-msvc."
 }
 if ($AgentInterval -lt 1) {
-    Fail '-AgentInterval 必须是大于 0 的整数。'
+    Fail '-AgentInterval must be greater than zero.'
 }
 
 $ProgramDataDir = Split-Path -Parent $ConfigFile
@@ -72,7 +72,7 @@ try {
         } elseif (Test-Path -LiteralPath $Artifact -PathType Leaf) {
             $ZipFile = (Resolve-Path -LiteralPath $Artifact).Path
         } else {
-            Fail "构建产物不存在: $Artifact"
+            Fail "Artifact does not exist: $Artifact"
         }
     } else {
         Download-File $ReleaseUrl $ZipFile
@@ -83,7 +83,7 @@ try {
     $DownloadedExe = Get-ChildItem -LiteralPath $ExtractDir -Recurse -Filter 'stat_client.exe' |
         Select-Object -First 1
     if (-not $DownloadedExe) {
-        Fail 'ZIP 中找不到 stat_client.exe。'
+        Fail 'stat_client.exe was not found in the ZIP.'
     }
 
     $BinaryFile = Join-Path $InstallDir 'stat_client.exe'
@@ -98,9 +98,9 @@ try {
     Copy-Item -LiteralPath $DownloadedExe.FullName -Destination $BinaryFile -Force
     $VersionOutput = & $BinaryFile --version 2>&1
     if ($LASTEXITCODE -ne 0 -or -not ($VersionOutput -match '^stat_client')) {
-        Fail "stat_client.exe 无法在当前 Windows 上运行，可能是架构或文件错误: $VersionOutput"
+        Fail "stat_client.exe cannot run on this Windows host: $VersionOutput"
     }
-    Write-Host "检测到: $VersionOutput"
+    Write-Host "Detected: $VersionOutput"
 
     $LauncherFile = Join-Path $InstallDir 'run-rust-agent.ps1'
     $BundledLauncher = Get-ChildItem -LiteralPath $ExtractDir -Recurse -Filter 'run-rust-agent.ps1' |
@@ -115,13 +115,13 @@ try {
     $ConfigExists = Test-Path -LiteralPath $ConfigFile -PathType Leaf
     if ($ForceConfig -or -not $ConfigExists) {
         if (-not $AgentUser -and -not $AgentGid) {
-            $AgentUser = Read-Host '请输入固定主机用户名（动态组可直接回车）'
+            $AgentUser = Read-Host 'Fixed-host username (press Enter for group mode)'
         }
         if (-not $AgentGid -and -not $AgentUser) {
-            Fail '必须指定 AgentUser，或指定 AgentGid。'
+            Fail 'Specify AgentUser or AgentGid.'
         }
         if (-not $AgentPassword) {
-            $SecurePassword = Read-Host '请输入 Agent 密码' -AsSecureString
+            $SecurePassword = Read-Host 'Agent password' -AsSecureString
             $PasswordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
             try {
                 $AgentPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($PasswordPointer)
@@ -130,7 +130,7 @@ try {
             }
         }
         if (-not $AgentPassword) {
-            Fail 'AgentPassword 不能为空。'
+            Fail 'AgentPassword cannot be empty.'
         }
         if ($AgentGid -and -not $AgentAlias) {
             $AgentAlias = $env:COMPUTERNAME
@@ -152,19 +152,19 @@ try {
         }
         $ConfigLines += '}'
         Set-Content -LiteralPath $ConfigFile -Value $ConfigLines -Encoding UTF8
-        Write-Host "已生成配置: $ConfigFile"
+        Write-Host "Created config: $ConfigFile"
     } else {
-        Write-Host "保留已有配置: $ConfigFile"
+        Write-Host "Preserving existing config: $ConfigFile"
     }
 
     try {
         $Config = Import-PowerShellDataFile -LiteralPath $ConfigFile
     } catch {
-        Fail "配置文件格式错误: $($_.Exception.Message)"
+        Fail "Invalid config file: $($_.Exception.Message)"
     }
     foreach ($RequiredKey in @('Addr', 'User', 'Pass', 'Location', 'Type', 'Interval')) {
         if (-not $Config.ContainsKey($RequiredKey) -or -not [string]$Config[$RequiredKey]) {
-            Fail "配置文件缺少有效字段: $RequiredKey"
+            Fail "Config field is missing or empty: $RequiredKey"
         }
     }
 
@@ -196,10 +196,10 @@ try {
     Start-ScheduledTask -TaskName $TaskName
 
     Write-Host ''
-    Write-Host "安装完成: $InstallDir" -ForegroundColor Green
-    Write-Host "任务名称: $TaskName"
-    Write-Host "日志文件: $LogFile"
-    Write-Host "查看日志: Get-Content '$LogFile' -Wait"
+    Write-Host "Installation complete: $InstallDir" -ForegroundColor Green
+    Write-Host "Task name: $TaskName"
+    Write-Host "Log file: $LogFile"
+    Write-Host ("Follow log with: Get-Content {0} -Wait" -f $LogFile)
 } finally {
     Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
 }
